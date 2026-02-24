@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "networkx>=3.0",
+#     "verifiers>=0.1.9.post3",
+#     "datasets",
+# ]
+# ///
+
 """CausalReasoningEnv_1 — Minimal Adjustment Set Identification.
 
 Given a randomly generated DAG with a designated treatment node X and
@@ -243,6 +252,40 @@ async def format_compliance(completion) -> float:
     return 1.0 if parse_answer(content) is not None else 0.0
 
 
+async def valid_adjustment_set(completion, info) -> float:
+    """Reward: whether the predicted set is a valid (not necessarily minimal) adjustment set.
+
+    A set Z is valid if:
+      1. No node in Z is a descendant of X (post-treatment bias check).
+      2. Z d-separates X from Y in the backdoor graph (G with X's outgoing edges removed).
+
+    Returns 1.0 if valid, 0.0 otherwise (including unparseable answers).
+    """
+    content = completion[-1]["content"]
+    predicted = parse_answer(content)
+    if predicted is None:
+        return 0.0
+
+    data = json.loads(info)
+    X = data["X"]
+    Y = data["Y"]
+
+    G = nx.DiGraph()
+    G.add_nodes_from(data["nodes"])
+    G.add_edges_from(data["edges"])
+
+    # Descendant check: no node in Z may be a descendant of X
+    if predicted & nx.descendants(G, X):
+        return 0.0
+
+    # Build backdoor graph: remove all outgoing edges from X
+    G_bd = G.copy()
+    G_bd.remove_edges_from(list(G.out_edges(X)))
+
+    # D-separation check
+    return 1.0 if nx.d_separated(G_bd, {X}, {Y}, predicted) else 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset builder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,11 +301,31 @@ def build_dataset(problems: list[dict]) -> Dataset:
                 "minimal_adjustment_set": p["minimal_adjustment_set"],
                 "X": p["X"],
                 "Y": p["Y"],
+                "edges": p["edges"],
+                "nodes": p["nodes"],
                 "num_nodes": p["num_nodes"],
                 "num_backdoor_paths": p["num_backdoor_paths"],
             }),
         })
     return Dataset.from_list(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment subclass
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class CausalReasoningEnv(vf.ToolEnv):
+    """ToolEnv subclass that allows plain assistant messages without tool calls.
+
+    Overrides `no_tools_called` without the @vf.stop decorator so it is not
+    registered as a stop condition. The model may reason freely across multiple
+    turns before (or without) calling any tools.
+    """
+
+    async def no_tools_called(self, _state: vf.State) -> bool:
+        """Not a stop condition — plain assistant messages do not end the rollout."""
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,8 +367,8 @@ def load_environment(
     tools: list = []
 
     rubric = vf.Rubric(
-        funcs=[adjustment_set_accuracy, format_compliance],
-        weights=[1.0, 0.1],
+        funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
+        weights=[1.0, 0.5, 0.1],
     )
 
     return vf.ToolEnv(
@@ -316,3 +379,34 @@ def load_environment(
         rubric=rubric,
         max_turns=10,  # headroom for tool-call turns; 1 effective turn without tools
     )
+
+
+if __name__ == "__main__":
+    NUM_SAMPLES = 3
+
+    all_problems = generate_dag_problems(n_graphs=200 + 50, seed=42)
+    train_ds = build_dataset(all_problems[:200])
+    eval_ds = build_dataset(all_problems[200:])
+
+    def print_sample(row: dict, idx: int, split: str) -> None:
+        info = json.loads(row["info"])
+        print(f"{'='*70}")
+        print(f"[{split}] Example {idx}")
+        print(f"{'='*70}")
+        print(row["question"])
+        print(f"\nMinimal adjustment set : {info['minimal_adjustment_set']}")
+        print(f"Num nodes              : {info['num_nodes']}")
+        print(f"Num backdoor paths     : {info['num_backdoor_paths']}")
+        print()
+
+    print(f"\n{'#'*70}")
+    print(f"  TRAIN DATASET  ({len(train_ds)} examples, showing {NUM_SAMPLES})")
+    print(f"{'#'*70}\n")
+    for i in range(NUM_SAMPLES):
+        print_sample(train_ds[i], i, "train")
+
+    print(f"\n{'#'*70}")
+    print(f"  EVAL DATASET  ({len(eval_ds)} examples, showing {NUM_SAMPLES})")
+    print(f"{'#'*70}\n")
+    for i in range(NUM_SAMPLES):
+        print_sample(eval_ds[i], i, "eval")
