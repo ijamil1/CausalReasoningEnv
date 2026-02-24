@@ -1,0 +1,318 @@
+"""CausalReasoningEnv_1 — Minimal Adjustment Set Identification.
+
+Given a randomly generated DAG with a designated treatment node X and
+outcome node Y, the model must identify the minimal adjustment set Z:
+the smallest set of non-descendants of X whose conditioning blocks all
+backdoor paths between X and Y (via d-separation in the backdoor graph).
+
+Environment type: ToolEnv (tools=[] for now; add graph-exploration tools
+when the tool interface is decided without changing reward logic).
+"""
+
+import json
+import random
+import re
+
+import networkx as nx
+import verifiers as vf
+from datasets import Dataset
+from networkx.algorithms.d_separation import find_minimal_d_separator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAG generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_dag(n: int, edge_prob: float, rng: random.Random) -> nx.DiGraph:
+    """Generate a random DAG by keeping only forward edges from an Erdos-Renyi graph."""
+    nodes = list(range(n))
+    edges = [
+        (u, v)
+        for u in nodes
+        for v in nodes
+        if u < v and rng.random() < edge_prob
+    ]
+    return nx.DiGraph(edges)
+
+
+def generate_dag_problems(
+    n_graphs: int = 200,
+    min_nodes: int = 7,
+    max_nodes: int = 14,
+    edge_prob: float = 0.35,
+    seed: int = 42,
+) -> list[dict]:
+    """Generate a list of causal adjustment-set problems via rejection sampling.
+
+    Each problem satisfies:
+      - Y is a descendant of X (a causal path exists).
+      - Y is a leaf node (no outgoing edges).
+      - At least 2 backdoor paths exist, with at least one of length > 3.
+
+    Returns a list of dicts with keys:
+        edges, nodes, X, Y, minimal_adjustment_set, num_nodes, num_backdoor_paths.
+    """
+    rng = random.Random(seed)
+    problems: list[dict] = []
+
+    while len(problems) < n_graphs:
+        n = rng.randint(min_nodes, max_nodes)
+        G = _make_dag(n, edge_prob, rng)
+        nodes_list = list(G.nodes())
+        if len(nodes_list) < 2:
+            continue
+
+        X, Y = rng.sample(nodes_list, 2)
+
+        # Y must be reachable from X
+        if not nx.has_path(G, X, Y):
+            continue
+        # Y must be a leaf
+        if G.out_degree(Y) > 0:
+            continue
+        # No cycles (implicit in DAG construction, but guard anyway)
+        if nx.has_path(G, Y, X):
+            continue
+
+        # Backdoor graph: remove all edges out of X
+        G_bd = G.copy()
+        G_bd.remove_edges_from(list(G.out_edges(X)))
+
+        try:
+            bd_paths = list(nx.all_simple_paths(G_bd.to_undirected(), X, Y))
+            if len(bd_paths) < 2 or not any(len(p) > 3 for p in bd_paths):
+                continue
+            min_set = find_minimal_d_separator(G_bd, X, Y)
+        except Exception:
+            continue
+
+        problems.append({
+            "edges": [(int(u), int(v)) for u, v in G.edges()],
+            "nodes": [int(n) for n in G.nodes()],
+            "X": int(X),
+            "Y": int(Y),
+            "minimal_adjustment_set": sorted(int(n) for n in min_set),
+            "num_nodes": len(nodes_list),
+            "num_backdoor_paths": len(bd_paths),
+        })
+
+    return problems
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt construction
+# ─────────────────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """\
+You are an expert in causal inference and graphical models.
+
+You will be given a Directed Acyclic Graph (DAG) described as a list of \
+directed edges, a treatment node X, and an outcome node Y.
+
+BACKGROUND
+----------
+A **backdoor path** from X to Y is any path in the graph that begins with \
+an arrow INTO X (i.e., it "sneaks around" the front-door causal path). \
+Backdoor paths create confounding bias when estimating the causal effect of X on Y.
+
+An **adjustment set** Z is a set of non-descendants of X such that, when we \
+condition on Z, all backdoor paths between X and Y are blocked (d-separated \
+in the graph with X's outgoing edges removed). Conditioning on Z allows us \
+to compute the unconfounded causal effect P(Y | do(X)).
+
+The **minimal adjustment set** is the smallest valid adjustment set — the \
+fewest nodes needed. If X and Y are already d-separated in the backdoor \
+graph (no open backdoor paths), the minimal set is empty: {}.
+
+IMPORTANT RULES
+---------------
+- Never include descendants of X in Z (this would open new biases).
+- A collider node on a path BLOCKS that path unless conditioned on; \
+  conditioning on a collider (or its descendant) OPENS the path — avoid this.
+- Your answer must be a subset of the non-descendant, non-X, non-Y nodes.
+
+RESPONSE FORMAT (strict)
+------------------------
+Every response must contain exactly one <reasoning> block followed by \
+exactly one <answer> block. No other XML tags are permitted.
+
+<reasoning>
+Walk through the graph structure, identify backdoor paths, explain \
+which nodes block them without opening collider paths, and justify \
+why your set is minimal.
+</reasoning>
+<answer>{node_id1, node_id2, ...}</answer>
+
+Use integer node IDs inside curly braces, comma-separated. \
+For an empty adjustment set use <answer>{}</answer>."""
+
+
+def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
+    """Render a DAG problem as a readable string for the model."""
+    # Build parent/child lookup
+    parents: dict[int, list[int]] = {n: [] for n in nodes}
+    children: dict[int, list[int]] = {n: [] for n in nodes}
+    for u, v in edges:
+        children[u].append(v)
+        parents[v].append(u)
+
+    edge_str = ", ".join(f"{u}→{v}" for u, v in sorted(edges))
+    node_str = ", ".join(str(n) for n in sorted(nodes))
+
+    adj_lines = []
+    for n in sorted(nodes):
+        pa = sorted(parents[n])
+        ch = sorted(children[n])
+        adj_lines.append(
+            f"  Node {n}: parents=[{', '.join(map(str, pa))}]  "
+            f"children=[{', '.join(map(str, ch))}]"
+        )
+    adj_str = "\n".join(adj_lines)
+
+    return (
+        f"Nodes: {node_str}\n"
+        f"Edges: {edge_str}\n\n"
+        f"Adjacency:\n{adj_str}\n\n"
+        f"Treatment (X): {X}\n"
+        f"Outcome   (Y): {Y}\n\n"
+        f"What is the minimal adjustment set Z that blocks all backdoor "
+        f"paths from {X} to {Y}?"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Answer parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def parse_answer(content: str) -> set[int] | None:
+    """Extract the adjustment set from the model's <answer> tag.
+
+    Returns a set of ints, or None if the format is invalid.
+    """
+    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL)
+    matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", stripped, flags=re.DOTALL)
+    if len(matches) != 1:
+        return None
+    inner = matches[0].strip()
+    m = re.match(r"^\{(.*)\}$", inner, re.DOTALL)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    if body == "":
+        return set()
+    try:
+        return {int(x.strip()) for x in body.split(",")}
+    except ValueError:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reward functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def adjustment_set_accuracy(completion, info) -> float:
+    """Reward: correctness of the predicted minimal adjustment set.
+
+    Scoring:
+      - Exact match → 1.0
+      - Partial match → Jaccard similarity (intersection / union)
+      - Unparseable answer → 0.0
+    """
+    content = completion[-1]["content"]
+    predicted = parse_answer(content)
+    if predicted is None:
+        return 0.0
+    gold = set(json.loads(info)["minimal_adjustment_set"])
+    if predicted == gold:
+        return 1.0
+    union = len(predicted | gold)
+    if union == 0:
+        return 1.0  # both empty
+    return len(predicted & gold) / union
+
+
+async def format_compliance(completion) -> float:
+    """Reward: whether the response follows the required XML format.
+
+    Returns 1.0 if <answer>{...}</answer> is correctly present, else 0.0.
+    """
+    content = completion[-1]["content"]
+    return 1.0 if parse_answer(content) is not None else 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def build_dataset(problems: list[dict]) -> Dataset:
+    """Convert a list of problem dicts into a HuggingFace Dataset."""
+    rows = []
+    for p in problems:
+        rows.append({
+            "question": format_problem(p["edges"], p["nodes"], p["X"], p["Y"]),
+            "info": json.dumps({
+                "minimal_adjustment_set": p["minimal_adjustment_set"],
+                "X": p["X"],
+                "Y": p["Y"],
+                "num_nodes": p["num_nodes"],
+                "num_backdoor_paths": p["num_backdoor_paths"],
+            }),
+        })
+    return Dataset.from_list(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def load_environment(
+    num_train: int = 200,
+    num_eval: int = 50,
+    min_nodes: int = 7,
+    max_nodes: int = 14,
+) -> vf.Environment:
+    """Load the CausalReasoningEnv_1 environment.
+
+    Generates disjoint train/eval splits of DAG adjustment-set problems.
+    Training examples use seed=42; eval examples use the tail of the same
+    rejection-sampled pool so they are guaranteed non-overlapping.
+
+    Args:
+        num_train: Number of training examples (default 200).
+        num_eval:  Number of evaluation examples (default 50).
+        min_nodes: Minimum DAG size (default 7).
+        max_nodes: Maximum DAG size (default 14).
+    """
+    all_problems = generate_dag_problems(
+        n_graphs=num_train + num_eval,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        seed=42,
+    )
+    train_dataset = build_dataset(all_problems[:num_train])
+    eval_dataset = build_dataset(all_problems[num_train:])
+
+    # TODO: add graph-exploration tools here once the tool interface is decided.
+    # Examples: get_parents(node), get_children(node), get_descendants(node),
+    # find_paths(source, target), check_d_separation(X, Y, Z).
+    # With tools=[], the env behaves as single-turn (max_turns is irrelevant).
+    tools: list = []
+
+    rubric = vf.Rubric(
+        funcs=[adjustment_set_accuracy, format_compliance],
+        weights=[1.0, 0.1],
+    )
+
+    return vf.ToolEnv(
+        dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
+        rubric=rubric,
+        max_turns=10,  # headroom for tool-call turns; 1 effective turn without tools
+    )
