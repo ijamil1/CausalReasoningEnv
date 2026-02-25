@@ -249,7 +249,7 @@ def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
         f"What is the minimal adjustment set Z that blocks all backdoor "
         f"paths from {X} to {Y}?\n"
         f"The rendered image of this DAG is also provided "
-        f"(blue node = treatment X, orange node = outcome Y).\n\n"
+        f"(blue node = treatment X, orange node = outcome Y).\n"
     )
 
 
@@ -417,8 +417,8 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
 
 
 def load_environment(
-    num_train: int = 200,
-    num_eval: int = 50,
+    num_train: int = 250,
+    num_eval: int = 100,
     min_nodes: int = 7,
     max_nodes: int = 14,
 ) -> vf.Environment:
