@@ -203,18 +203,36 @@ IMPORTANT RULES
 
 RESPONSE FORMAT (strict)
 ------------------------
-Every response must contain exactly one <reasoning> block followed by \
-exactly one <answer> block. No other XML tags are permitted.
+Your response MUST follow this structure exactly — no exceptions:
+
+1. Open a <reasoning> block in which you write your analysis and explanation.
+2. Close the </reasoning> block.
+3. Immediately after </reasoning>, write exactly one <answer> block.
+
+Example (DAG: nodes 0,1,2,3; edges 0→1, 0→3, 1→2, 2→3; X=1, Y=3):
 
 <reasoning>
-Walk through the graph structure, identify backdoor paths, explain \
-which nodes block them without opening collider paths, and justify \
-why your set is minimal.
-</reasoning>
-<answer>{node_id1, node_id2, ...}</answer>
+Causal path from X=1 to Y=3: 1→2→3. This is the front-door path and is not \
+a backdoor path.
 
-Use integer node IDs inside curly braces, comma-separated. \
-For an empty adjustment set use <answer>{}</answer>."""
+Backdoor paths start with an arrow INTO X=1. Node 1 has one parent: 0. \
+So the only backdoor path is: 1←0→3. This path is open (0 is not a collider).
+
+To block it I must condition on a non-descendant of X that lies on this path. \
+Node 0 is a non-descendant of X=1 and blocks the path 1←0→3. \
+Conditioning on node 2 would also block the path but 2 is a descendant of X, \
+so it is forbidden.
+
+The minimal adjustment set is therefore {0}.
+</reasoning>
+<answer>{0}</answer>
+
+CRITICAL RULES for formatting:
+- You MUST close </reasoning> before writing <answer>.
+- Do NOT write <answer> tags anywhere inside the <reasoning> block.
+- There must be EXACTLY ONE <answer> tag in your entire response.
+- Use integer node IDs inside curly braces, comma-separated.
+- For an empty adjustment set use <answer>{}</answer>."""
 
 
 def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
