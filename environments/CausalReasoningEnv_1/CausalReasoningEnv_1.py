@@ -262,7 +262,7 @@ The minimal adjustment set is therefore {1}.
 <answer>{1}</answer>"""
 
 _ICL_EXAMPLE_2 = """
-Here is another worked example.
+Here is another worked example. The rendered DAG for this example is shown in the first image immediately following this system message.
 
 Example (nodes 0,1,2,3,4,5,6,7; edges 0→1, 0→2, 0→3, 0→6, 0→7, 1→5, 2→4, 3→7, 4→6, 5→6; X=2, Y=6):
 
@@ -290,6 +290,14 @@ The minimal adjustment set is therefore {0}.
 <answer>{0}</answer>"""
 
 SYSTEM_PROMPT_1 = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
+
+# Pre-render the second ICL example's DAG at module load time so it can be
+# injected into the system message at rollout time without re-computing it.
+_ICL2_G = nx.DiGraph([
+    (0, 1), (0, 2), (0, 3), (0, 6), (0, 7),
+    (1, 5), (2, 4), (3, 7), (4, 6), (5, 6),
+])
+_ICL_EXAMPLE_2_B64 = _render_dag_b64(_ICL2_G, X=2, Y=6)
 
 
 def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
@@ -469,8 +477,21 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
 
         b64 = _render_dag_b64(G, info["X"], info["Y"])
 
-        # Locate the last user message and upgrade its content to [text, image]
         prompt = list(state["prompt"])
+
+        # Upgrade system message to multimodal: append the ICL example 2 DAG image
+        # so the model sees the visual alongside the worked example text.
+        sys_idx = next((i for i, m in enumerate(prompt) if m["role"] == "system"), None)
+        if sys_idx is not None and isinstance(prompt[sys_idx]["content"], str):
+            prompt[sys_idx] = {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": prompt[sys_idx]["content"]},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_ICL_EXAMPLE_2_B64}"}},
+                ],
+            }
+
+        # Locate the last user message and upgrade its content to [text, image]
         last_user_idx = max(i for i, m in enumerate(prompt) if m["role"] == "user")
         original_text = prompt[last_user_idx]["content"]
         prompt[last_user_idx] = {
