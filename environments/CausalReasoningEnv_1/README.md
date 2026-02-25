@@ -5,7 +5,8 @@ A causal inference reasoning environment where the model must identify the **min
 ## Task Description
 
 Each problem presents:
-- A randomly generated **Directed Acyclic Graph (DAG)** as a node/edge list with an adjacency summary
+- A randomly generated **Directed Acyclic Graph (DAG)** as a node/edge list with a full adjacency summary
+- A **rendered image of the DAG** (blue node = treatment X, orange node = outcome Y) injected alongside the text
 - A **treatment node X** and an **outcome node Y**
 
 The model must identify the smallest set of nodes Z (the minimal adjustment set) that blocks all backdoor paths from X to Y, enabling unbiased estimation of the causal effect of X on Y.
@@ -25,16 +26,28 @@ DAGs are generated procedurally using rejection sampling, filtered to ensure:
 - Y is a leaf node (no outgoing edges)
 - At least 2 backdoor paths exist, with at least one of length > 3
 
-Default splits: **200 train / 50 eval**, using disjoint samples from the same rejection-sampling pool (seed=42).
+Default splits: **250 train / 100 eval**, using disjoint samples from the same rejection-sampling pool (seed=42).
 
 ## Environment Architecture
 
-**Type**: `vf.ToolEnv` (currently `tools=[]` — behaves as single-turn)
+**Type**: `vf.SingleTurnEnv` subclass (`CausalReasoningEnv`)
 
-The ToolEnv base is chosen so that graph-exploration tools can be added later without restructuring the reward or prompt logic. Candidate tools (TBD):
-- `get_parents(node)` / `get_children(node)` / `get_descendants(node)`
-- `find_paths(source, target)`
-- `check_d_separation(X, Y, Z)`
+The model receives one prompt and produces one response — no multi-turn loop, no tools.
+
+### Image injection via `setup_state`
+
+At the start of each rollout, `setup_state` reconstructs the `nx.DiGraph` from `state["info"]`, renders it as a PNG using a topological layer layout (sources at top, sinks at bottom), base64-encodes it, and replaces the user message's plain-string content with a `[text, image_url]` multimodal content list. This keeps the HuggingFace dataset lean (only edge lists are stored) while delivering a fresh rendered image to the model at rollout time.
+
+The rendered image is ~30–67 KB (PNG) depending on DAG size, consuming approximately **~590 visual tokens** at the default 800×600 resolution for Qwen3-VL models.
+
+### `load_environment` arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `num_train` | `250` | Number of training examples |
+| `num_eval` | `100` | Number of evaluation examples |
+| `min_nodes` | `7` | Minimum number of nodes per DAG |
+| `max_nodes` | `14` | Maximum number of nodes per DAG |
 
 ## Response Format
 
@@ -52,8 +65,9 @@ Empty adjustment set: `<answer>{}</answer>`
 
 | Function | Weight | Description |
 |---|---|---|
-| `adjustment_set_accuracy` | 1.0 | Exact match → 1.0; partial match → Jaccard similarity; unparseable → 0.0 |
-| `format_compliance` | 0.1 | 1.0 if `<answer>{...}</answer>` is correctly present, else 0.0 |
+| `adjustment_set_accuracy` | 0.9 | Exact match → 1.0; partial overlap → Jaccard similarity (intersection / union); unparseable → 0.0 |
+| `valid_adjustment_set` | 0.0 | (Metric only) 1.0 if the predicted set is a valid adjustment set (not necessarily minimal): no descendants of X included, and Z d-separates X from Y in the backdoor graph |
+| `format_compliance` | 0.1 | 1.0 if `<answer>{...}</answer>` is correctly present and parseable, else 0.0 |
 
 ## Installation & Evaluation
 
