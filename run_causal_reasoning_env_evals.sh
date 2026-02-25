@@ -1,15 +1,13 @@
 #!/bin/bash
 
+
 models=(
-    "qwen/qwen3-vl-235b-a22b-instruct"
-    "qwen/qwen3-vl-235b-a22b-thinking"
-    "qwen/qwen3-vl-30b-a3b-instruct"
-    "qwen/qwen3-vl-30b-a3b-thinking"
-    "qwen/qwen3-vl-8b-instruct"   
+    "Qwen/Qwen3-VL-32B-Instruct"
+    "Qwen/Qwen3-VL-8B-Instruct"
 )
 
 EVALS_DIR="./environments/CausalReasoningEnv_1/outputs/evals"
-
+source .env
 for model in "${models[@]}"; do
   short_name="${model#*/}"
   if ls "$EVALS_DIR" 2>/dev/null | grep -q "$short_name"; then

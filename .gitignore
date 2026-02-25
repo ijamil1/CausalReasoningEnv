@@ -1,4 +1,6 @@
 
+.env
+
 # outputs from `prime eval run`
 ./outputs
 *__pycache*
