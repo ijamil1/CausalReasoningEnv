@@ -1,7 +1,7 @@
 [project]
 name = "CausalReasoningEnv_1"
 description = "Tool environment for causal reasoning: given a random DAG with treatment and outcome nodes, identify the minimal adjustment set needed to block all backdoor paths."
-tags = ["causal-reasoning", "graph-reasoning", "tool-env", "train", "eval"]
+tags = ["reasoning", "causal-reasoning", "graph-reasoning", "single-turn", "train", "eval"]
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
