@@ -4,6 +4,7 @@
 #     "networkx>=3.0",
 #     "verifiers>=0.1.9.post3",
 #     "datasets",
+#     "matplotlib>=3.7",
 # ]
 # ///
 
@@ -14,18 +15,76 @@ outcome node Y, the model must identify the minimal adjustment set Z:
 the smallest set of non-descendants of X whose conditioning blocks all
 backdoor paths between X and Y (via d-separation in the backdoor graph).
 
-Environment type: ToolEnv (tools=[] for now; add graph-exploration tools
-when the tool interface is decided without changing reward logic).
+Environment type: SingleTurnEnv subclass. The DAG is rendered as a PNG
+at rollout start and injected into the prompt alongside the text description.
 """
 
+import base64
+import io
 import json
 import random
 import re
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend; must be set before pyplot import
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import networkx as nx
 import verifiers as vf
 from datasets import Dataset
 from networkx.algorithms.d_separation import find_minimal_d_separator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAG rendering
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _dag_layout(G: nx.DiGraph) -> dict:
+    """Layer-by-layer topological layout (sources at top, sinks at bottom)."""
+    pos = {}
+    for depth, layer in enumerate(nx.topological_generations(G)):
+        layer = sorted(layer)
+        for i, node in enumerate(layer):
+            pos[node] = ((i - (len(layer) - 1) / 2.0), -float(depth))
+    return pos
+
+
+def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> str:
+    """Render a DAG as a base64-encoded PNG string.
+
+    X (treatment) is drawn in blue, Y (outcome) in orange, all other nodes
+    in light gray. Labels use white text on colored nodes, black on gray.
+    Layout is topological so causal flow reads top-to-bottom.
+    """
+    pos = _dag_layout(G)
+
+    node_colors = ["#4C72B0" if n == X else "#DD8452" if n == Y else "#C8C8C8"
+                   for n in G.nodes()]
+    font_colors = {n: "white" if n in (X, Y) else "black" for n in G.nodes()}
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+
+    nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_color=node_colors, node_size=700)
+    nx.draw_networkx_edges(G, pos=pos, ax=ax, arrows=True, arrowsize=15,
+                           edge_color="#555555", width=1.5)
+    for node, (x, y) in pos.items():
+        ax.text(x, y, str(node), ha="center", va="center",
+                fontsize=10, color=font_colors[node], fontweight="bold")
+
+    ax.legend(handles=[
+        mpatches.Patch(color="#4C72B0", label=f"X = {X}  (treatment)"),
+        mpatches.Patch(color="#DD8452", label=f"Y = {Y}  (outcome)"),
+        mpatches.Patch(color="#C8C8C8", label="other nodes"),
+    ], loc="upper right", fontsize=9)
+    ax.set_title("Causal DAG", fontsize=12)
+    ax.axis("off")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,7 +175,8 @@ def generate_dag_problems(
 SYSTEM_PROMPT = """\
 You are an expert in causal inference and graphical models.
 
-You will be given a Directed Acyclic Graph (DAG) described as a list of \
+You will be given a Directed Acyclic Graph (DAG) repesenting a structural causal model. You will be given both a textual and an image representation of the DAG. \
+The textual reprsentation describes the graph as a list of \
 directed edges, a treatment node X, and an outcome node Y.
 
 BACKGROUND
@@ -180,13 +240,16 @@ def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
     adj_str = "\n".join(adj_lines)
 
     return (
+        f"Here is the textual representation of the DAG: \n"
         f"Nodes: {node_str}\n"
         f"Edges: {edge_str}\n\n"
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
         f"What is the minimal adjustment set Z that blocks all backdoor "
-        f"paths from {X} to {Y}?"
+        f"paths from {X} to {Y}?\n"
+        f"The rendered image of this DAG is also provided "
+        f"(blue node = treatment X, orange node = outcome Y).\n\n"
     )
 
 
@@ -315,17 +378,37 @@ def build_dataset(problems: list[dict]) -> Dataset:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class CausalReasoningEnv(vf.ToolEnv):
-    """ToolEnv subclass that allows plain assistant messages without tool calls.
+class CausalReasoningEnv(vf.SingleTurnEnv):
+    """SingleTurnEnv that renders each DAG as a PNG and injects it into the prompt.
 
-    Overrides `no_tools_called` without the @vf.stop decorator so it is not
-    registered as a stop condition. The model may reason freely across multiple
-    turns before (or without) calling any tools.
+    setup_state runs once at the start of each rollout. It reconstructs the
+    graph from state["info"], renders it as a base64 PNG, and replaces the
+    last user message's plain-string content with a [text, image_url] list —
+    the multimodal format expected by vision-capable models.
     """
 
-    async def no_tools_called(self, _state: vf.State) -> bool:
-        """Not a stop condition — plain assistant messages do not end the rollout."""
-        return False
+    async def setup_state(self, state: vf.State, **kwargs) -> vf.State:
+        info = state["info"]
+        G = nx.DiGraph()
+        G.add_nodes_from(info["nodes"])
+        G.add_edges_from(info["edges"])
+
+        b64 = _render_dag_b64(G, info["X"], info["Y"])
+
+        # Locate the last user message and upgrade its content to [text, image]
+        prompt = list(state["prompt"])
+        last_user_idx = max(i for i, m in enumerate(prompt) if m["role"] == "user")
+        original_text = prompt[last_user_idx]["content"]
+        prompt[last_user_idx] = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": original_text},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ],
+        }
+        state["prompt"] = prompt
+
+        return await super().setup_state(state, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,24 +443,16 @@ def load_environment(
     train_dataset = build_dataset(all_problems[:num_train])
     eval_dataset = build_dataset(all_problems[num_train:])
 
-    # TODO: add graph-exploration tools here once the tool interface is decided.
-    # Examples: get_parents(node), get_children(node), get_descendants(node),
-    # find_paths(source, target), check_d_separation(X, Y, Z).
-    # With tools=[], the env behaves as single-turn (max_turns is irrelevant).
-    tools: list = []
-
     rubric = vf.Rubric(
         funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
-        weights=[1.0, 0.5, 0.1],
+        weights=[0.9, 0.0, 0.1],
     )
 
-    return vf.ToolEnv(
+    return CausalReasoningEnv(
         dataset=train_dataset,
         eval_dataset=eval_dataset,
         system_prompt=SYSTEM_PROMPT,
-        tools=tools,
         rubric=rubric,
-        max_turns=10,  # headroom for tool-call turns; 1 effective turn without tools
     )
 
 
