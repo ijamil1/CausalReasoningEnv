@@ -297,7 +297,7 @@ async def adjustment_set_accuracy(completion, info) -> float:
     predicted = parse_answer(content)
     if predicted is None:
         return 0.0
-    gold = set(json.loads(info)["minimal_adjustment_set"])
+    gold = set(info["minimal_adjustment_set"])
     if predicted == gold:
         return 1.0
     union = len(predicted | gold)
@@ -329,13 +329,12 @@ async def valid_adjustment_set(completion, info) -> float:
     if predicted is None:
         return 0.0
 
-    data = json.loads(info)
-    X = data["X"]
-    Y = data["Y"]
+    X = info["X"]
+    Y = info["Y"]
 
     G = nx.DiGraph()
-    G.add_nodes_from(data["nodes"])
-    G.add_edges_from(data["edges"])
+    G.add_nodes_from(info["nodes"])
+    G.add_edges_from(info["edges"])
 
     # Descendant check: no node in Z may be a descendant of X
     if predicted & nx.descendants(G, X):
