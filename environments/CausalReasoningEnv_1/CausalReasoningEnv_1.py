@@ -65,18 +65,23 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
-    nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_color=node_colors, node_size=700)
-    nx.draw_networkx_edges(G, pos=pos, ax=ax, arrows=True, arrowsize=15,
-                           edge_color="#555555", width=1.5)
+    node_size = 700
+    nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_color=node_colors, node_size=node_size)
+    # connectionstyle curves edges so collinear nodes don't obscure long-range arrows
+    nx.draw_networkx_edges(G, pos=pos, ax=ax, arrows=True, arrowsize=20,
+                           edge_color="#555555", width=1.5,
+                           node_size=node_size,
+                           connectionstyle="arc3,rad=0.15")
     for node, (x, y) in pos.items():
         ax.text(x, y, str(node), ha="center", va="center",
                 fontsize=10, color=font_colors[node], fontweight="bold")
 
+    # Place legend outside the axes to avoid covering nodes
     ax.legend(handles=[
         mpatches.Patch(color="#4C72B0", label=f"X = {X}  (treatment)"),
         mpatches.Patch(color="#DD8452", label=f"Y = {Y}  (outcome)"),
         mpatches.Patch(color="#C8C8C8", label="other nodes"),
-    ], loc="upper right", fontsize=9)
+    ], loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=9)
     ax.set_title("Causal DAG", fontsize=12)
     ax.axis("off")
 
@@ -110,6 +115,7 @@ def generate_dag_problems(
     max_nodes: int = 14,
     edge_prob: float = 0.35,
     seed: int = 42,
+    exclude: set[frozenset] | None = None,
 ) -> list[dict]:
     """Generate a list of causal adjustment-set problems via rejection sampling.
 
@@ -117,12 +123,18 @@ def generate_dag_problems(
       - Y is a descendant of X (a causal path exists).
       - Y is a leaf node (no outgoing edges).
       - At least 2 backdoor paths exist, with at least one of length > 3.
+      - No two problems share the same (edges, X, Y) signature (uniqueness).
+
+    Args:
+        exclude: Optional set of (frozenset(edges), X, Y) signatures to reject,
+                 used to guarantee disjointness from an existing problem pool.
 
     Returns a list of dicts with keys:
         edges, nodes, X, Y, minimal_adjustment_set, num_nodes, num_backdoor_paths.
     """
     rng = random.Random(seed)
     problems: list[dict] = []
+    seen: set[tuple] = set(exclude) if exclude else set()
 
     while len(problems) < n_graphs:
         n = rng.randint(min_nodes, max_nodes)
@@ -155,6 +167,12 @@ def generate_dag_problems(
         except Exception:
             continue
 
+        # Uniqueness check
+        sig = (frozenset((int(u), int(v)) for u, v in G.edges()), int(X), int(Y))
+        if sig in seen:
+            continue
+        seen.add(sig)
+
         problems.append({
             "edges": [(int(u), int(v)) for u, v in G.edges()],
             "nodes": [int(n) for n in G.nodes()],
@@ -172,11 +190,12 @@ def generate_dag_problems(
 # Prompt construction
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_BASE = """\
 You are an expert in causal inference and graphical models.
 
-You will be given a Directed Acyclic Graph (DAG) repesenting a structural causal model. You will be given both a textual and an image representation of the DAG. \
-The textual reprsentation describes the graph as a list of \
+You will be given a Directed Acyclic Graph (DAG) representing a structural causal model. \
+You will be given both a textual and an image representation of the DAG. \
+The textual representation describes the graph as a list of \
 directed edges, a treatment node X, and an outcome node Y.
 
 BACKGROUND
@@ -209,30 +228,68 @@ Your response MUST follow this structure exactly — no exceptions:
 2. Close the </reasoning> block.
 3. Immediately after </reasoning>, write exactly one <answer> block.
 
-Example (DAG: nodes 0,1,2,3; edges 0→1, 0→3, 1→2, 2→3; X=1, Y=3):
-
-<reasoning>
-Causal path from X=1 to Y=3: 1→2→3. This is the front-door path and is not \
-a backdoor path.
-
-Backdoor paths start with an arrow INTO X=1. Node 1 has one parent: 0. \
-So the only backdoor path is: 1←0→3. This path is open (0 is not a collider).
-
-To block it I must condition on a non-descendant of X that lies on this path. \
-Node 0 is a non-descendant of X=1 and blocks the path 1←0→3. \
-Conditioning on node 2 would also block the path but 2 is a descendant of X, \
-so it is forbidden.
-
-The minimal adjustment set is therefore {0}.
-</reasoning>
-<answer>{0}</answer>
-
 CRITICAL RULES for formatting:
 - You MUST close </reasoning> before writing <answer>.
 - Do NOT write <answer> tags anywhere inside the <reasoning> block.
 - There must be EXACTLY ONE <answer> tag in your entire response.
 - Use integer node IDs inside curly braces, comma-separated.
 - For an empty adjustment set use <answer>{}</answer>."""
+
+_ICL_EXAMPLE_1 = """
+Here is a worked example to illustrate the expected reasoning and format.
+
+Example (nodes 0,1,3,4,5; edges 0→1, 0→3, 1→3, 1→5, 3→5, 4→5; X=3, Y=5):
+
+<reasoning>
+Causal path from X=3 to Y=5: 3→5. This is the front-door path; it is not a backdoor path.
+
+Descendants of X=3: node 5 (via 3→5). All other nodes (0, 1, 4) are non-descendants and are candidates for Z.
+
+Backdoor paths start with an arrow INTO X=3. Node 3 has two parents: 0 and 1.
+
+Enumerate all backdoor paths:
+  Path 1: 3←1→5. Node 1 is a non-collider on this path, so the path is open.
+  Path 2: 3←0→1→5. Nodes 0 and 1 are non-colliders, so this path is open.
+  (Node 4→5 creates no backdoor path because 4 is not a parent of X=3.)
+
+To block Path 1 (3←1→5) I must condition on node 1.
+Conditioning on node 1 also blocks Path 2 (3←0→1→5) because 1 lies on that path too.
+
+Could {0} alone work? Node 0 blocks Path 2 but does NOT block Path 1 (3←1→5), so {0} is insufficient.
+
+The minimal adjustment set is therefore {1}.
+</reasoning>
+<answer>{1}</answer>"""
+
+_ICL_EXAMPLE_2 = """
+Here is another worked example.
+
+Example (nodes 0,1,2,3,4,5,6,7; edges 0→1, 0→2, 0→3, 0→6, 0→7, 1→5, 2→4, 3→7, 4→6, 5→6; X=2, Y=6):
+
+<reasoning>
+Causal path from X=2 to Y=6: 2→4→6. This is the front-door path; it is not a backdoor path.
+
+Descendants of X=2: nodes 4 (via 2→4) and 6 (via 2→4→6). Non-descendants are 0, 1, 3, 5, 7.
+
+Backdoor paths start with an arrow INTO X=2. Node 2 has exactly one parent: node 0.
+
+Enumerate all backdoor paths (all must start 2←0):
+  Path 1: 2←0→6. Node 0 is a non-collider; path is open.
+  Path 2: 2←0→1→5→6. Nodes 0, 1, 5 are all non-colliders; path is open.
+  (0→3→7 and 0→7 are dead ends that do not reach Y=6.)
+
+Both paths pass through node 0 — the sole parent of X. Conditioning on 0 blocks both simultaneously.
+Node 0 is a non-descendant of X=2, so it is a valid conditioning node.
+
+Could a different single node work?
+  {1} blocks Path 2 but not Path 1 (2←0→6 bypasses 1). Insufficient.
+  {5} blocks Path 2 but not Path 1. Insufficient.
+
+The minimal adjustment set is therefore {0}.
+</reasoning>
+<answer>{0}</answer>"""
+
+SYSTEM_PROMPT_1 = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
 
 
 def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
@@ -433,32 +490,27 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def load_environment(
-    num_train: int = 250,
-    num_eval: int = 100,
-    min_nodes: int = 7,
-    max_nodes: int = 14,
-) -> vf.Environment:
+_NUM_TRAIN = 250
+_NUM_EVAL = 100
+_MIN_NODES = 5
+_MAX_NODES = 8
+_SEED = 42
+
+
+def load_environment() -> vf.Environment:
     """Load the CausalReasoningEnv_1 environment.
 
     Generates disjoint train/eval splits of DAG adjustment-set problems.
-    Training examples use seed=42; eval examples use the tail of the same
-    rejection-sampled pool so they are guaranteed non-overlapping.
-
-    Args:
-        num_train: Number of training examples (default 200).
-        num_eval:  Number of evaluation examples (default 50).
-        min_nodes: Minimum DAG size (default 7).
-        max_nodes: Maximum DAG size (default 14).
+    All parameters are fixed to ensure identical datasets across every run.
     """
     all_problems = generate_dag_problems(
-        n_graphs=num_train + num_eval,
-        min_nodes=min_nodes,
-        max_nodes=max_nodes,
-        seed=42,
+        n_graphs=_NUM_TRAIN + _NUM_EVAL,
+        min_nodes=_MIN_NODES,
+        max_nodes=_MAX_NODES,
+        seed=_SEED,
     )
-    train_dataset = build_dataset(all_problems[:num_train])
-    eval_dataset = build_dataset(all_problems[num_train:])
+    train_dataset = build_dataset(all_problems[:_NUM_TRAIN])
+    eval_dataset = build_dataset(all_problems[_NUM_TRAIN:])
 
     rubric = vf.Rubric(
         funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
@@ -468,37 +520,58 @@ def load_environment(
     return CausalReasoningEnv(
         dataset=train_dataset,
         eval_dataset=eval_dataset,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT_1,
         rubric=rubric,
     )
 
 
 if __name__ == "__main__":
-    NUM_SAMPLES = 3
+    import base64 as _b64
 
-    all_problems = generate_dag_problems(n_graphs=200 + 50, seed=42)
-    train_ds = build_dataset(all_problems[:200])
-    eval_ds = build_dataset(all_problems[200:])
+    # ── Reproduce the fixed train+eval pool ──────────────────────────────────
+    all_problems = generate_dag_problems(
+        n_graphs=_NUM_TRAIN + _NUM_EVAL,
+        min_nodes=_MIN_NODES,
+        max_nodes=_MAX_NODES,
+        seed=_SEED,
+    )
 
-    def print_sample(row: dict, idx: int, split: str) -> None:
-        info = json.loads(row["info"])
+    # Build a set of their signatures for exclusion
+    train_eval_sigs = {
+        (frozenset((int(u), int(v)) for u, v in p["edges"]), p["X"], p["Y"])
+        for p in all_problems
+    }
+    print(f"Train+eval pool: {len(all_problems)} unique problems (seed={_SEED})")
+
+    # ── Generate 2 ICL examples disjoint from train+eval ────────────────────
+    _ICL_SEED = 77
+    icl_problems = generate_dag_problems(
+        n_graphs=2,
+        min_nodes=_MIN_NODES,
+        max_nodes=_MAX_NODES,
+        seed=_ICL_SEED,
+        exclude=train_eval_sigs,
+    )
+
+    print(f"ICL examples: {len(icl_problems)} unique problems (seed={_ICL_SEED})\n")
+
+    for i, p in enumerate(icl_problems):
+        edges_str = ", ".join(f"{u}→{v}" for u, v in sorted(p["edges"]))
         print(f"{'='*70}")
-        print(f"[{split}] Example {idx}")
+        print(f"ICL Example {i + 1}")
         print(f"{'='*70}")
-        print(row["question"])
-        print(f"\nMinimal adjustment set : {info['minimal_adjustment_set']}")
-        print(f"Num nodes              : {info['num_nodes']}")
-        print(f"Num backdoor paths     : {info['num_backdoor_paths']}")
-        print()
+        print(f"  nodes                 = {sorted(p['nodes'])}")
+        print(f"  edges                 = {edges_str}")
+        print(f"  X={p['X']}, Y={p['Y']}")
+        print(f"  minimal_adjustment_set = {p['minimal_adjustment_set']}")
+        print(f"  num_nodes={p['num_nodes']}, num_backdoor_paths={p['num_backdoor_paths']}")
+        print(f"  formatted problem:")
+        print(format_problem(p["edges"], p["nodes"], p["X"], p["Y"]))
 
-    print(f"\n{'#'*70}")
-    print(f"  TRAIN DATASET  ({len(train_ds)} examples, showing {NUM_SAMPLES})")
-    print(f"{'#'*70}\n")
-    for i in range(NUM_SAMPLES):
-        print_sample(train_ds[i], i, "train")
-
-    print(f"\n{'#'*70}")
-    print(f"  EVAL DATASET  ({len(eval_ds)} examples, showing {NUM_SAMPLES})")
-    print(f"{'#'*70}\n")
-    for i in range(NUM_SAMPLES):
-        print_sample(eval_ds[i], i, "eval")
+        G = nx.DiGraph()
+        G.add_nodes_from(p["nodes"])
+        G.add_edges_from(p["edges"])
+        img_path = f"/tmp/icl_example_{i + 1}.png"
+        with open(img_path, "wb") as fh:
+            fh.write(_b64.b64decode(_render_dag_b64(G, p["X"], p["Y"])))
+        print(f"  DAG image saved → {img_path}\n")

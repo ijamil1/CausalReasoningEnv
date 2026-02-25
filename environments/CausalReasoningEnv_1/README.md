@@ -26,7 +26,7 @@ DAGs are generated procedurally using rejection sampling, filtered to ensure:
 - Y is a leaf node (no outgoing edges)
 - At least 2 backdoor paths exist, with at least one of length > 3
 
-Default splits: **250 train / 100 eval**, using disjoint samples from the same rejection-sampling pool (seed=42).
+Splits and DAG generation parameters are fixed constants — **250 train / 100 eval**, nodes 5–8, seed=42 — so the dataset is identical across every run. All problems are unique by (edges, X, Y) signature.
 
 ## Environment Architecture
 
@@ -40,14 +40,17 @@ At the start of each rollout, `setup_state` reconstructs the `nx.DiGraph` from `
 
 The rendered image is ~30–67 KB (PNG) depending on DAG size, consuming approximately **~590 visual tokens** at the default 800×600 resolution for Qwen3-VL models.
 
-### `load_environment` arguments
+### `load_environment`
 
-| Argument | Default | Description |
-|---|---|---|
-| `num_train` | `250` | Number of training examples |
-| `num_eval` | `100` | Number of evaluation examples |
-| `min_nodes` | `7` | Minimum number of nodes per DAG |
-| `max_nodes` | `14` | Maximum number of nodes per DAG |
+Takes no arguments. All parameters are fixed internally:
+
+| Parameter | Value |
+|---|---|
+| `num_train` | `250` |
+| `num_eval` | `100` |
+| `min_nodes` | `5` |
+| `max_nodes` | `8` |
+| `seed` | `42` |
 
 ## Response Format
 
