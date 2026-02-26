@@ -5,7 +5,7 @@
 ./outputs
 *__pycache*
 environments/num_seq_env/.prime
-environments/CausalExplorerEnv/outputs/*
+environments/*/outputs/
 test_optimal_steps.py
 */*/.prime/
 */*/dist/
