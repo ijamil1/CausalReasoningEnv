@@ -1,32 +1,28 @@
-# Prime Intellect Environments
+# CausalReasoningEnv_1
 
-Creating RL environments for LLM training and evaluation, built with Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework. Workspace scaffolded via `prime lab setup`.
+Single-turn causal inference environment where a model must identify the minimal adjustment set for a given DAG. Built with Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
 
 ## Setup
 
 ```bash
-uv sync
+prime env install CausalReasoningEnv_1
 ```
 
 ## Usage
 
 ```bash
-# Create a new environment
-prime env init <env-name>
-
 # Install locally
-prime env install <env-name>
+prime env install CausalReasoningEnv_1
 
 # Run evaluation
-prime eval run <env-name>
+prime eval run CausalReasoningEnv_1
 
 # Push to Prime Hub
-prime env push -p ./environments/<env_name>
+prime env push -p ./environments/CausalReasoningEnv_1
 ```
 
-## Environments
+## Environment
 
 | Environment | Description |
 | ----------- | ----------- |
-| [num-seq-env](environments/num_seq_env/) | Inductive reasoning over numeric sequences governed by order-2 linear recurrence relations |
-| [CausalExplorerEnv](environments/CausalExplorerEnv/) |  Multi-turn causal reasoning environment based on the Blicket detector paradigm from developmental psychology. Tests an LLM's ability to design experiments, reason causally, and identify hidden causal structure. Inspired by  [Do LLMs Think Like Scientists? Causal Reasoning and Hypothesis Testing in LLMs](https://arxiv.org/pdf/2505.09614) |
+| [CausalReasoningEnv_1](environments/CausalReasoningEnv_1/) | Single-turn environment where the model receives a randomly generated DAG (as a node/edge list and rendered image) and must identify the minimal adjustment set that blocks all backdoor paths from a treatment node X to an outcome node Y. Problems are stratified by difficulty (standard, collider, ancestor). |
