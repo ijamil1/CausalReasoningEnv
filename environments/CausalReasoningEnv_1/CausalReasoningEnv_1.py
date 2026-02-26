@@ -22,6 +22,7 @@ at rollout start and injected into the prompt alongside the text description.
 import base64
 import io
 import json
+import pathlib
 import random
 import re
 
@@ -109,81 +110,177 @@ def _make_dag(n: int, edge_prob: float, rng: random.Random) -> nx.DiGraph:
     return nx.DiGraph(edges)
 
 
-def generate_dag_problems(
-    n_graphs: int = 200,
-    min_nodes: int = 7,
-    max_nodes: int = 14,
-    edge_prob: float = 0.35,
-    seed: int = 42,
-    exclude: set[frozenset] | None = None,
-) -> list[dict]:
-    """Generate a list of causal adjustment-set problems via rejection sampling.
+def _try_sample_problem(
+    rng: random.Random,
+    min_nodes: int,
+    max_nodes: int,
+    edge_prob: float,
+) -> dict | None:
+    """Attempt to sample one valid causal adjustment-set problem.
 
-    Each problem satisfies:
+    Each accepted problem satisfies:
       - Y is a descendant of X (a causal path exists).
       - Y is a leaf node (no outgoing edges).
-      - At least 2 backdoor paths exist, with at least one of length > 3.
-      - No two problems share the same (edges, X, Y) signature (uniqueness).
+      - At least 4 backdoor paths exist, with at least one of length ≥ 5 nodes.
+      - A minimal d-separator (adjustment set) exists.
+
+    Returns a problem dict (including a temporary "G" key for the nx.DiGraph
+    used by _classify_problem) or None if any filter fails.
+    """
+    n = rng.randint(min_nodes, max_nodes)
+    G = _make_dag(n, edge_prob, rng)
+    nodes_list = list(G.nodes())
+    if len(nodes_list) < 2:
+        return None
+
+    X, Y = rng.sample(nodes_list, 2)
+
+    # Y must be reachable from X
+    if not nx.has_path(G, X, Y):
+        return None
+    # Y must be a leaf
+    if G.out_degree(Y) > 0:
+        return None
+    # No back-path (should be impossible in a DAG, but guard anyway)
+    if nx.has_path(G, Y, X):
+        return None
+
+    # Backdoor graph: remove all edges out of X
+    G_bd = G.copy()
+    G_bd.remove_edges_from(list(G.out_edges(X)))
+
+    try:
+        bd_paths = list(nx.all_simple_paths(G_bd.to_undirected(), X, Y))
+        if len(bd_paths) < 4 or not any(len(p) >= 5 for p in bd_paths):
+            return None
+        min_set = find_minimal_d_separator(G_bd, X, Y)
+        if min_set is None:
+            return None
+    except Exception:
+        return None
+
+    return {
+        "G": G,  # temporary; removed before dataset serialisation
+        "edges": [(int(u), int(v)) for u, v in G.edges()],
+        "nodes": [int(nd) for nd in G.nodes()],
+        "X": int(X),
+        "Y": int(Y),
+        "minimal_adjustment_set": sorted(int(nd) for nd in min_set),
+        "num_nodes": len(nodes_list),
+        "num_backdoor_paths": len(bd_paths),
+    }
+
+
+def _classify_problem(problem: dict) -> str:
+    """Classify a problem by the mechanism behind its ratio (|min_set|/|parents(X)|).
+
+    Uses the temporary "G" key placed by _try_sample_problem.
+
+    Classifications:
+      "standard" — |min_set| >= |parents(X)|  (all parents needed; ratio ≥ 1)
+      "ancestor" — ratio < 1 AND there exists a dropped parent p such that some
+                   z ∈ min_set has a directed path z → … → p in G. This means
+                   z is an ancestor of p, and conditioning on z blocks p's
+                   backdoor contribution without conditioning on p itself.
+      "collider" — ratio < 1 AND no dropped parent has any ancestor in min_set.
+                   The redundancy arises from a collider structure on the backdoor
+                   path(s) through that parent, not from ancestor absorption.
+    """
+    G: nx.DiGraph = problem["G"]
+    X = problem["X"]
+    parents_X = set(G.predecessors(X))
+    min_set = set(problem["minimal_adjustment_set"])
+
+    if len(min_set) >= len(parents_X):
+        return "standard"
+
+    # ratio < 1: at least one parent was dropped from the minimal set
+    dropped_parents = parents_X - min_set
+    for p in dropped_parents:
+        ancestors_of_p = nx.ancestors(G, p)
+        if ancestors_of_p & min_set:
+            # Some node in min_set is an ancestor of dropped parent p —
+            # conditioning on that ancestor blocks p's confounding path too.
+            return "ancestor"
+
+    return "collider"
+
+
+def generate_stratified_dag_problems(
+    n_train: int = 250,
+    n_eval: int = 100,
+    min_nodes: int = 8,
+    max_nodes: int = 12,
+    edge_prob: float = 0.41,
+    seed: int = 42,
+    target_ratio_lt1: float = 0.40,
+    target_ancestor_fraction: float = 0.50,
+    exclude: set[tuple] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Generate stratified train and eval problem pools with controlled difficulty.
+
+    Distribution targets (applied to both train and eval via stratified split):
+      - ~target_ratio_lt1 of all problems have |min_set| < |parents(X)|.
+      - Within those, ~target_ancestor_fraction are "ancestor" type (the rest
+        are "collider" type).
 
     Args:
         exclude: Optional set of (frozenset(edges), X, Y) signatures to reject,
                  used to guarantee disjointness from an existing problem pool.
 
-    Returns a list of dicts with keys:
-        edges, nodes, X, Y, minimal_adjustment_set, num_nodes, num_backdoor_paths.
+    Returns:
+        (train_problems, eval_problems): two lists of problem dicts with keys:
+        edges, nodes, X, Y, minimal_adjustment_set, num_nodes,
+        num_backdoor_paths, num_parents_X, problem_type.
     """
     rng = random.Random(seed)
-    problems: list[dict] = []
+    n_total = n_train + n_eval
+
+    n_lt1 = round(target_ratio_lt1 * n_total)
+    n_ancestor = round(target_ancestor_fraction * n_lt1)
+    n_collider = n_lt1 - n_ancestor
+    n_standard = n_total - n_lt1
+
+    targets = {"standard": n_standard, "ancestor": n_ancestor, "collider": n_collider}
+    buckets: dict[str, list[dict]] = {"standard": [], "ancestor": [], "collider": []}
     seen: set[tuple] = set(exclude) if exclude else set()
 
-    while len(problems) < n_graphs:
-        n = rng.randint(min_nodes, max_nodes)
-        G = _make_dag(n, edge_prob, rng)
-        nodes_list = list(G.nodes())
-        if len(nodes_list) < 2:
+    while any(len(buckets[t]) < targets[t] for t in targets):
+        prob = _try_sample_problem(rng, min_nodes, max_nodes, edge_prob)
+        if prob is None:
             continue
 
-        X, Y = rng.sample(nodes_list, 2)
-
-        # Y must be reachable from X
-        if not nx.has_path(G, X, Y):
-            continue
-        # Y must be a leaf
-        if G.out_degree(Y) > 0:
-            continue
-        # No cycles (implicit in DAG construction, but guard anyway)
-        if nx.has_path(G, Y, X):
-            continue
-
-        # Backdoor graph: remove all edges out of X
-        G_bd = G.copy()
-        G_bd.remove_edges_from(list(G.out_edges(X)))
-
-        try:
-            bd_paths = list(nx.all_simple_paths(G_bd.to_undirected(), X, Y))
-            if len(bd_paths) < 2 or not any(len(p) > 3 for p in bd_paths):
-                continue
-            min_set = find_minimal_d_separator(G_bd, X, Y)
-        except Exception:
-            continue
-
-        # Uniqueness check
-        sig = (frozenset((int(u), int(v)) for u, v in G.edges()), int(X), int(Y))
+        sig = (frozenset((int(u), int(v)) for u, v in prob["edges"]), prob["X"], prob["Y"])
         if sig in seen:
             continue
+
+        ptype = _classify_problem(prob)
+        if len(buckets[ptype]) >= targets[ptype]:
+            continue
+
+        G: nx.DiGraph = prob.pop("G")
+        parents_X = set(G.predecessors(prob["X"]))
+        prob["num_parents_X"] = len(parents_X)
+        prob["problem_type"] = ptype
+        buckets[ptype].append(prob)
         seen.add(sig)
 
-        problems.append({
-            "edges": [(int(u), int(v)) for u, v in G.edges()],
-            "nodes": [int(n) for n in G.nodes()],
-            "X": int(X),
-            "Y": int(Y),
-            "minimal_adjustment_set": sorted(int(n) for n in min_set),
-            "num_nodes": len(nodes_list),
-            "num_backdoor_paths": len(bd_paths),
-        })
+    # Stratified split: each bucket contributes proportionally to train and eval
+    train_frac = n_train / n_total if n_total > 0 else 1.0
+    train_problems: list[dict] = []
+    eval_problems: list[dict] = []
 
-    return problems
+    for ptype in ("standard", "ancestor", "collider"):
+        probs = buckets[ptype]
+        rng.shuffle(probs)
+        n_to_train = round(len(probs) * train_frac)
+        train_problems.extend(probs[:n_to_train])
+        eval_problems.extend(probs[n_to_train:])
+
+    rng.shuffle(train_problems)
+    rng.shuffle(eval_problems)
+
+    return train_problems, eval_problems
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,66 +335,105 @@ CRITICAL RULES for formatting:
 _ICL_EXAMPLE_1 = """
 Here is a worked example to illustrate the expected reasoning and format.
 
-Example (nodes 0,1,3,4,5; edges 0→1, 0→3, 1→3, 1→5, 3→5, 4→5; X=3, Y=5):
+Example (nodes 0–10; edges 0→1, 0→2, 0→6, 0→8, 0→9, 1→4, 1→8, 1→10, 2→3, 2→4, 2→7, 2→9, \
+2→10, 3→4, 3→7, 4→7, 4→9, 5→8, 5→10, 6→7, 6→8, 7→9, 8→9, 8→10; X=8, Y=9):
 
 <reasoning>
-Causal path from X=3 to Y=5: 3→5. This is the front-door path; it is not a backdoor path.
+Causal paths from X=8 to Y=9: 8→9 (direct).
 
-Descendants of X=3: node 5 (via 3→5). All other nodes (0, 1, 4) are non-descendants and are candidates for Z.
+Descendants of X=8: {9, 10}. Non-descendants eligible for Z: {0, 1, 2, 3, 4, 5, 6, 7}.
 
-Backdoor paths start with an arrow INTO X=3. Node 3 has two parents: 0 and 1.
+Backdoor graph: remove edges 8→9 and 8→10.
 
-Enumerate all backdoor paths:
-  Path 1: 3←1→5. Node 1 is a non-collider on this path, so the path is open.
-  Path 2: 3←0→1→5. Nodes 0 and 1 are non-colliders, so this path is open.
-  (Node 4→5 creates no backdoor path because 4 is not a parent of X=3.)
+Parents of X=8 — the only possible first steps of any backdoor path: {0, 1, 5, 6}.
 
-To block Path 1 (3←1→5) I must condition on node 1.
-Conditioning on node 1 also blocks Path 2 (3←0→1→5) because 1 lies on that path too.
+Verify each parent can reach Y=9 through an open path in the (undirected) backdoor graph:
 
-Could {0} alone work? Node 0 blocks Path 2 but does NOT block Path 1 (3←1→5), so {0} is insufficient.
+  Parent 0: 8←0→9 (direct edge 0→9; node 0 is a fork non-collider; open) — must condition on 0.
 
-The minimal adjustment set is therefore {1}.
+  Parent 1: 8←1→4→9 (at node 1: fork non-collider; at 4: chain non-collider; open) — must condition on 1.
+
+  Parent 5: Consider all undirected paths starting 8–5.
+    Node 5 connects only to 8 (via 5→8) and 10 (via 5→10).
+    Every path from 5 toward Y must pass through node 10.
+    At node 10: arrows arrive from multiple parents (5→10, 1→10, 2→10). Node 10 is a COLLIDER
+    (all arrows point INTO it). A collider blocks the path by default unless we condition on it
+    or one of its descendants. Node 10 is a descendant of X=8 (8→10), so we cannot condition on it.
+    Therefore ALL backdoor paths through parent 5 are blocked by the un-activatable collider at 10.
+    Parent 5 is not a confounder and need not appear in Z.
+
+  Parent 6: 8←6→7→9 (at node 6: fork non-collider; at 7: chain non-collider; open) — must condition on 6.
+
+Active backdoor routes require blocking via parents 0, 1, and 6.
+
+Check that no proper subset of {0, 1, 6} suffices:
+  Drop 0: path 8←0→9 remains open.
+  Drop 1: path 8←1→4→9 remains open.
+  Drop 6: path 8←6→7→9 remains open.
+
+No colliders are inadvertently activated — each of {0, 1, 6} is a non-collider on every path it
+lies on, and none is a descendant of X=8.
+
+The minimal adjustment set is therefore {0, 1, 6}.
 </reasoning>
-<answer>{1}</answer>"""
+<answer>{0, 1, 6}</answer>"""
 
 _ICL_EXAMPLE_2 = """
 Here is another worked example. The rendered DAG for this example is shown in the first image immediately following this system message.
 
-Example (nodes 0,1,2,3,4,5,6,7; edges 0→1, 0→2, 0→3, 0→6, 0→7, 1→5, 2→4, 3→7, 4→6, 5→6; X=2, Y=6):
+Example (nodes 0–8; edges 0→2, 0→4, 0→6, 0→7, 1→2, 1→3, 1→4, 1→7, 2→8, 3→4, 3→5, 4→5, \
+4→6, 4→8, 5→8; X=4, Y=8):
 
 <reasoning>
-Causal path from X=2 to Y=6: 2→4→6. This is the front-door path; it is not a backdoor path.
+Causal paths from X=4 to Y=8: 4→8 (direct) and 4→5→8.
 
-Descendants of X=2: nodes 4 (via 2→4) and 6 (via 2→4→6). Non-descendants are 0, 1, 3, 5, 7.
+Descendants of X=4: {5, 6, 8}. Non-descendants eligible for Z: {0, 1, 2, 3, 7}.
 
-Backdoor paths start with an arrow INTO X=2. Node 2 has exactly one parent: node 0.
+Backdoor graph: remove edges 4→5, 4→6, 4→8.
 
-Enumerate all backdoor paths (all must start 2←0):
-  Path 1: 2←0→6. Node 0 is a non-collider; path is open.
-  Path 2: 2←0→1→5→6. Nodes 0, 1, 5 are all non-colliders; path is open.
-  (0→3→7 and 0→7 are dead ends that do not reach Y=6.)
+Parents of X=4 — the only possible first steps of any backdoor path: {0, 1, 3}.
 
-Both paths pass through node 0 — the sole parent of X. Conditioning on 0 blocks both simultaneously.
-Node 0 is a non-descendant of X=2, so it is a valid conditioning node.
+Verify each parent independently reaches Y=8 in the backdoor graph:
+  Parent 0: 4←0→2→8  (at node 0: fork non-collider; at 2: chain non-collider; open)
+  Parent 1: 4←1→2→8  (at node 1: fork non-collider; at 2: chain non-collider; open)
+  Parent 3: 4←3→5→8  (at node 3: fork non-collider; at 5: chain non-collider; open)
+    Note: node 5 is a descendant of X=4, but since we do NOT condition on 5, the path remains open.
+    We must never include descendants of X in Z — but they may still appear on open backdoor paths.
 
-Could a different single node work?
-  {1} blocks Path 2 but not Path 1 (2←0→6 bypasses 1). Insufficient.
-  {5} blocks Path 2 but not Path 1. Insufficient.
+Check for collider shortcuts. Path 4←0→7←1→2→8:
+  At node 7: arrows from both 0 (0→7) and 1 (1→7) point INTO 7 — node 7 is a COLLIDER.
+  Node 7 is not in Z and not a descendant of X=4, so the collider is not activated; this path
+  is blocked. No adjustment for this path is needed.
 
-The minimal adjustment set is therefore {0}.
+All three parents open independent backdoor routes and there is no shortcut: each path via parent 0,
+1, and 3 reaches Y through a different intermediate chain (node 2 for parents 0 and 1, node 5 for
+parent 3).
+
+Check that no proper subset of {0, 1, 3} suffices:
+  Drop 0: path 4←0→2→8 remains open.
+  Drop 1: path 4←1→2→8 remains open.
+  Drop 3: path 4←3→5→8 remains open.
+
+No colliders are inadvertently activated — each of {0, 1, 3} is a non-collider on every path it
+lies on, and none is a descendant of X=4.
+
+The minimal adjustment set is therefore {0, 1, 3}.
 </reasoning>
-<answer>{0}</answer>"""
+<answer>{0, 1, 3}</answer>"""
 
 SYSTEM_PROMPT_1 = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
 
 # Pre-render the second ICL example's DAG at module load time so it can be
 # injected into the system message at rollout time without re-computing it.
 _ICL2_G = nx.DiGraph([
-    (0, 1), (0, 2), (0, 3), (0, 6), (0, 7),
-    (1, 5), (2, 4), (3, 7), (4, 6), (5, 6),
+    (0, 2), (0, 4), (0, 6), (0, 7),
+    (1, 2), (1, 3), (1, 4), (1, 7),
+    (2, 8),
+    (3, 4), (3, 5),
+    (4, 5), (4, 6), (4, 8),
+    (5, 8),
 ])
-_ICL_EXAMPLE_2_B64 = _render_dag_b64(_ICL2_G, X=2, Y=6)
+_ICL_EXAMPLE_2_B64 = _render_dag_b64(_ICL2_G, X=4, Y=8)
 
 
 def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
@@ -450,6 +586,8 @@ def build_dataset(problems: list[dict]) -> Dataset:
                 "nodes": p["nodes"],
                 "num_nodes": p["num_nodes"],
                 "num_backdoor_paths": p["num_backdoor_paths"],
+                "num_parents_X": p.get("num_parents_X"),
+                "problem_type": p.get("problem_type"),
             }),
         })
     return Dataset.from_list(rows)
@@ -513,25 +651,52 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
 
 _NUM_TRAIN = 250
 _NUM_EVAL = 100
-_MIN_NODES = 5
-_MAX_NODES = 8
+_MIN_NODES = 8
+_MAX_NODES = 12
 _SEED = 42
 
+# Paths where __main__ saves and load_environment() can load from.
+_DATASET_DIR = pathlib.Path(__file__).parent / "datasets"
+_TRAIN_DATASET_PATH = _DATASET_DIR / "train"
+_EVAL_DATASET_PATH = _DATASET_DIR / "eval"
 
-def load_environment() -> vf.Environment:
+
+def load_environment(
+    train_dataset: Dataset | None = None,
+    eval_dataset: Dataset | None = None,
+) -> vf.Environment:
     """Load the CausalReasoningEnv_1 environment.
 
-    Generates disjoint train/eval splits of DAG adjustment-set problems.
-    All parameters are fixed to ensure identical datasets across every run.
+    If datasets are not passed, attempts to auto-load pre-built datasets from
+    disk. If no datasets exist on disk, generates them from scratch (slow; run
+    __main__ to pre-build and save them).
+
+    Args:
+        train_dataset: Pre-built HuggingFace Dataset for training.
+        eval_dataset: Pre-built HuggingFace Dataset for evaluation.
+
+    Auto-load example (reads from disk if available):
+        env = load_environment()
     """
-    all_problems = generate_dag_problems(
-        n_graphs=_NUM_TRAIN + _NUM_EVAL,
-        min_nodes=_MIN_NODES,
-        max_nodes=_MAX_NODES,
-        seed=_SEED,
-    )
-    train_dataset = build_dataset(all_problems[:_NUM_TRAIN])
-    eval_dataset = build_dataset(all_problems[_NUM_TRAIN:])
+    from datasets import load_from_disk
+
+    if train_dataset is None and _TRAIN_DATASET_PATH.exists():
+        train_dataset = load_from_disk(str(_TRAIN_DATASET_PATH))
+    if eval_dataset is None and _EVAL_DATASET_PATH.exists():
+        eval_dataset = load_from_disk(str(_EVAL_DATASET_PATH))
+
+    if train_dataset is None or eval_dataset is None:
+        train_problems, eval_problems = generate_stratified_dag_problems(
+            n_train=_NUM_TRAIN,
+            n_eval=_NUM_EVAL,
+            min_nodes=_MIN_NODES,
+            max_nodes=_MAX_NODES,
+            seed=_SEED,
+        )
+        if train_dataset is None:
+            train_dataset = build_dataset(train_problems)
+        if eval_dataset is None:
+            eval_dataset = build_dataset(eval_problems)
 
     rubric = vf.Rubric(
         funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
@@ -548,31 +713,58 @@ def load_environment() -> vf.Environment:
 
 if __name__ == "__main__":
     import base64 as _b64
+    from collections import Counter
 
-    # ── Reproduce the fixed train+eval pool ──────────────────────────────────
-    all_problems = generate_dag_problems(
-        n_graphs=_NUM_TRAIN + _NUM_EVAL,
+    # ── Generate stratified train + eval pools ────────────────────────────────
+    print(f"Generating stratified problems (seed={_SEED}, nodes={_MIN_NODES}–{_MAX_NODES})…")
+    train_problems, eval_problems = generate_stratified_dag_problems(
+        n_train=_NUM_TRAIN,
+        n_eval=_NUM_EVAL,
         min_nodes=_MIN_NODES,
         max_nodes=_MAX_NODES,
         seed=_SEED,
     )
+    print(f"  Train: {len(train_problems)} problems")
+    print(f"  Eval:  {len(eval_problems)} problems")
+    for split_name, probs in [("Train", train_problems), ("Eval", eval_problems)]:
+        counts = Counter(p["problem_type"] for p in probs)
+        print(f"  {split_name} type distribution: {dict(counts)}")
 
-    # Build a set of their signatures for exclusion
-    train_eval_sigs = {
+    # ── Build and save HuggingFace Datasets to disk ───────────────────────────
+    train_dataset = build_dataset(train_problems)
+    eval_dataset = build_dataset(eval_problems)
+
+    _DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    train_dataset.save_to_disk(str(_TRAIN_DATASET_PATH))
+    eval_dataset.save_to_disk(str(_EVAL_DATASET_PATH))
+    print(f"\nTrain dataset ({len(train_dataset)} rows) saved → {_TRAIN_DATASET_PATH}")
+    print(f"Eval  dataset ({len(eval_dataset)} rows) saved → {_EVAL_DATASET_PATH}\n")
+
+    # ── Build signature set for ICL exclusion ────────────────────────────────
+    all_sigs: set[tuple] = {
         (frozenset((int(u), int(v)) for u, v in p["edges"]), p["X"], p["Y"])
-        for p in all_problems
+        for p in train_problems + eval_problems
     }
-    print(f"Train+eval pool: {len(all_problems)} unique problems (seed={_SEED})")
 
-    # ── Generate 2 ICL examples disjoint from train+eval ────────────────────
+    # ── Generate 2 ICL examples disjoint from train+eval ─────────────────────
     _ICL_SEED = 77
-    icl_problems = generate_dag_problems(
-        n_graphs=2,
-        min_nodes=_MIN_NODES,
-        max_nodes=_MAX_NODES,
-        seed=_ICL_SEED,
-        exclude=train_eval_sigs,
-    )
+    print(f"Generating ICL examples (seed={_ICL_SEED})…")
+    icl_rng = random.Random(_ICL_SEED)
+    icl_problems: list[dict] = []
+    while len(icl_problems) < 2:
+        prob = _try_sample_problem(icl_rng, _MIN_NODES, _MAX_NODES, 0.41)
+        if prob is None:
+            continue
+        sig = (frozenset((int(u), int(v)) for u, v in prob["edges"]), prob["X"], prob["Y"])
+        if sig in all_sigs:
+            continue
+        ptype = _classify_problem(prob)
+        G_icl: nx.DiGraph = prob.pop("G")
+        parents_X_icl = set(G_icl.predecessors(prob["X"]))
+        prob["num_parents_X"] = len(parents_X_icl)
+        prob["problem_type"] = ptype
+        icl_problems.append(prob)
+        all_sigs.add(sig)
 
     print(f"ICL examples: {len(icl_problems)} unique problems (seed={_ICL_SEED})\n")
 
@@ -581,18 +773,19 @@ if __name__ == "__main__":
         print(f"{'='*70}")
         print(f"ICL Example {i + 1}")
         print(f"{'='*70}")
-        print(f"  nodes                 = {sorted(p['nodes'])}")
-        print(f"  edges                 = {edges_str}")
+        print(f"  nodes                  = {sorted(p['nodes'])}")
+        print(f"  edges                  = {edges_str}")
         print(f"  X={p['X']}, Y={p['Y']}")
         print(f"  minimal_adjustment_set = {p['minimal_adjustment_set']}")
+        print(f"  num_parents_X={p['num_parents_X']}, problem_type={p['problem_type']}")
         print(f"  num_nodes={p['num_nodes']}, num_backdoor_paths={p['num_backdoor_paths']}")
         print(f"  formatted problem:")
         print(format_problem(p["edges"], p["nodes"], p["X"], p["Y"]))
 
-        G = nx.DiGraph()
-        G.add_nodes_from(p["nodes"])
-        G.add_edges_from(p["edges"])
-        img_path = f"/tmp/icl_example_{i + 1}.png"
+        G_print = nx.DiGraph()
+        G_print.add_nodes_from(p["nodes"])
+        G_print.add_edges_from(p["edges"])
+        img_path = f"./icl_example_{i + 1}.png"
         with open(img_path, "wb") as fh:
-            fh.write(_b64.b64decode(_render_dag_b64(G, p["X"], p["Y"])))
+            fh.write(_b64.b64decode(_render_dag_b64(G_print, p["X"], p["Y"])))
         print(f"  DAG image saved → {img_path}\n")

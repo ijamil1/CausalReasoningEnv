@@ -21,12 +21,43 @@ A backdoor path is any undirected path between X and Y that has an arrow *into* 
 
 ## Dataset
 
-DAGs are generated procedurally using rejection sampling, filtered to ensure:
+DAGs are generated procedurally using stratified rejection sampling, filtered to ensure:
 - Y is a descendant of X (a causal effect exists)
 - Y is a leaf node (no outgoing edges)
-- At least 2 backdoor paths exist, with at least one of length > 3
+- At least 4 backdoor paths exist, with at least one of length ≥ 5 nodes
 
-Splits and DAG generation parameters are fixed constants — **250 train / 100 eval**, nodes 5–8, seed=42 — so the dataset is identical across every run. All problems are unique by (edges, X, Y) signature.
+**Difficulty stratification** — problems are classified by the relationship between the minimal adjustment set and the parents of X:
+- **standard** (~60%): all parents of X appear in the minimal set (ratio = 1)
+- **collider** (~20%): some parent is omitted because a collider on its backdoor path blocks it by default
+- **ancestor** (~20%): some parent is omitted because an ancestor of that parent is already in the minimal set, blocking its confounding contribution
+
+Both train and eval splits preserve this distribution. All problems are unique by (edges, X, Y) signature, and train/eval are disjoint.
+
+Generation parameters are fixed — **250 train / 100 eval**, nodes 8–12, edge probability 0.41, seed=42.
+
+### Pre-building datasets
+
+Run the module directly to generate and save both splits as HuggingFace Datasets (avoids regeneration on every `load_environment()` call):
+
+```bash
+uv run python environments/CausalReasoningEnv_1/CausalReasoningEnv_1.py
+```
+
+Datasets are saved to `environments/CausalReasoningEnv_1/datasets/{train,eval}`. Calling `load_environment()` with no arguments will auto-load from disk if the datasets exist, or regenerate them from scratch otherwise:
+
+```python
+# Auto-load from disk (recommended after running __main__)
+env = load_environment()
+
+# Or pass datasets explicitly
+from datasets import load_from_disk
+from CausalReasoningEnv_1 import load_environment, _TRAIN_DATASET_PATH, _EVAL_DATASET_PATH
+
+env = load_environment(
+    train_dataset=load_from_disk(str(_TRAIN_DATASET_PATH)),
+    eval_dataset=load_from_disk(str(_EVAL_DATASET_PATH)),
+)
+```
 
 ## Environment Architecture
 
@@ -38,19 +69,22 @@ The model receives one prompt and produces one response — no multi-turn loop, 
 
 At the start of each rollout, `setup_state` reconstructs the `nx.DiGraph` from `state["info"]`, renders it as a PNG using a topological layer layout (sources at top, sinks at bottom), base64-encodes it, and replaces the user message's plain-string content with a `[text, image_url]` multimodal content list. This keeps the HuggingFace dataset lean (only edge lists are stored) while delivering a fresh rendered image to the model at rollout time.
 
-The rendered image is ~30–67 KB (PNG) depending on DAG size, consuming approximately **~590 visual tokens** at the default 800×600 resolution for Qwen3-VL models.
+The system message is also upgraded to multimodal at rollout time to inject the pre-rendered ICL Example 2 DAG image alongside its worked solution.
 
 ### `load_environment`
 
-Takes no arguments. All parameters are fixed internally:
+Accepts optional pre-built `train_dataset` and `eval_dataset` arguments. If omitted, auto-loads from disk if datasets exist; otherwise regenerates from scratch using the fixed parameters below.
 
 | Parameter | Value |
 |---|---|
 | `num_train` | `250` |
 | `num_eval` | `100` |
-| `min_nodes` | `5` |
-| `max_nodes` | `8` |
+| `min_nodes` | `8` |
+| `max_nodes` | `12` |
+| `edge_prob` | `0.41` |
 | `seed` | `42` |
+| `target_ratio_lt1` | `0.40` |
+| `target_ancestor_fraction` | `0.50` |
 
 ## Response Format
 
