@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import verifiers as vf
 from datasets import Dataset
-from networkx.algorithms.d_separation import find_minimal_d_separator
+from networkx.algorithms.d_separation import find_minimal_d_separator, is_d_separator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,7 +428,7 @@ async def valid_adjustment_set(completion, info) -> float:
     G_bd.remove_edges_from(list(G.out_edges(X)))
 
     # D-separation check
-    return 1.0 if nx.d_separated(G_bd, {X}, {Y}, predicted) else 0.0
+    return 1.0 if is_d_separator(G_bd, {X}, {Y}, predicted) else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

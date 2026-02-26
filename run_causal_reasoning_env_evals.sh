@@ -8,7 +8,7 @@ models=(
 )
 
 EVALS_DIR="./environments/CausalReasoningEnv_1/outputs/evals"
-source .env
+set -a; source .env; set +a
 for model in "${models[@]}"; do
   short_name="${model#*/}"
   if ls "$EVALS_DIR" 2>/dev/null | grep -q "$short_name"; then
