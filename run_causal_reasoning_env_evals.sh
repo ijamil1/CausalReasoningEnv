@@ -2,8 +2,9 @@
 
 
 models=(
-    "Qwen/Qwen3-VL-32B-Instruct"
-    "Qwen/Qwen3-VL-8B-Instruct"
+  "Qwen/Qwen3-VL-8B-Instruct"
+  "Qwen/Qwen3-VL-32B-Instruct"
+    
 )
 
 EVALS_DIR="./environments/CausalReasoningEnv_1/outputs/evals"
@@ -14,7 +15,7 @@ for model in "${models[@]}"; do
     echo "Skipping $model (already has eval results for $short_name)"
   else
     echo "Running eval with model: $model"
-    prime eval run irfanjamil/CausalReasoningEnv_1 -n 100 -r 3 -m "$model"
+    prime eval run irfanjamil/CausalReasoningEnv_1 -n 100 -r 3 -m "$model" -b https://api.together.xyz/v1 -k TOGETHER_API_KEY
   fi
   echo ""
 done
