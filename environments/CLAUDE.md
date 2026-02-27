@@ -1,3 +1,84 @@
+# environments/CLAUDE.md
+
+## Project Context: Causal Reasoning Benchmark
+
+This repo builds a **five-flavor causal reasoning benchmark** and paired RL training environments. Read [BENCHMARK_DESIGN.md](../BENCHMARK_DESIGN.md) for full design rationale before modifying any environment.
+
+### Environments
+
+| Dir | Status | Flavor(s) |
+|-----|--------|-----------|
+| `CausalReasoningEnv_1/` | ✅ Built | Flavor 1 — Adjustment Set Identification |
+| `CausalReasoningEnv_2/` | 🚧 Planned | Flavors 1–5 via `vf.EnvGroup` |
+
+### Five Benchmark Flavors
+
+1. **Adjustment Set** — Given DAG + X, Y: find minimal valid Z blocking all backdoor paths.
+2. **ATE from Data** — Given DAG + observational CSV: estimate ATE/CATE numerically (tool use required).
+3. **Analytical ATE** — Given DAG + fully specified SCM: compute exact E[Y|do(X=x)].
+4. **Estimate SCM** — Given DAG + data: estimate structural equations by regressing each node on its causal parents.
+5. **Identification Formula** — Given DAG + equation forms (no params): write the backdoor adjustment formula symbolically.
+
+### Key Reuse from CausalReasoningEnv_1
+
+When building CausalReasoningEnv_2, reuse (don't rewrite) these from [CausalReasoningEnv_1.py](CausalReasoningEnv_1/CausalReasoningEnv_1.py):
+- `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` — DAG generation
+- `_render_dag_b64`, `format_problem` — DAG visualization/text rendering
+- `valid_adjustment_set`, `parse_answer` — reward function primitives
+
+### Reward Rubric Conventions (all flavors)
+
+Rubrics use 4 layers with these canonical weights:
+- **Layer 1 — Format compliance:** `weight=0.05` (parseable `<answer>...</answer>`)
+- **Layer 2 — Validity / process:** `weight=0.15` (valid adjustment set, correct parent selection, etc.)
+- **Layer 3 — Answer correctness:** `weight=0.80` (flavor-specific; see BENCHMARK_DESIGN.md for per-flavor scoring)
+- **Layer 4 — Monitoring metrics:** `weight=0` (tool usage, num_tool_calls, intermediate correctness)
+
+### Tools for CausalReasoningEnv_2
+
+Five tools are specified in BENCHMARK_DESIGN.md:
+- `check_d_separation(edges, X, Y, Z)` — available in both training and eval
+- `find_adjustment_sets(edges, X, Y)` — **training only**; remove or penalize in eval (gives away the answer)
+- `get_descendants(edges, node)` — available in both
+- `run_python(code)` — Python REPL for Flavors 2 and 4; backed by `vf.PythonEnv`
+- `load_data(format)` — loads observational CSV for Flavors 2 and 4
+
+### Data Generation Notes
+
+- **DAG structure:** Random DAGs with stratification (standard / collider / ancestor difficulty)
+- **Flavor 1:** Enumerate *all* minimal adjustment sets at generation time; store as `all_minimal_adjustment_sets: list[list[int]]` in `info`
+- **Flavors 2/4:** Linear Gaussian SCM, N=2000 rows, standardize all variables at generation time
+- **Flavor 3:** 75% linear SCM, 25% nonlinear (tanh/quadratic); simulation ATE via 1M samples
+- **Flavor 5:** Fully observed DAGs only; canonical formula stored as text; graded by numeric instantiation
+
+### Training Curriculum
+
+Build CausalReasoningEnv_2 to support a 5-phase curriculum:
+1. Flavor 1 only (graph reasoning warm-up)
+2. + Flavor 3 (do() operator with exact answers)
+3. + Flavor 5 (symbolic identification)
+4. + Flavor 2 (data → ATE, tool use)
+5. + Flavor 4 (full end-to-end pipeline)
+
+Phase out `find_adjustment_sets` tool after Phase 1 convergence to force internalized graph reasoning.
+
+### New Dependencies for CausalReasoningEnv_2
+
+Add to `pyproject.toml`: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
+
+### Self-Maintenance Rule
+
+When you detect a large design change or directional shift — e.g. a new benchmark flavor is added or removed, the reward rubric structure changes, a new environment is scaffolded, the tool set changes, or the training curriculum is revised — **proactively update the following files without being asked**:
+
+1. **`environments/CLAUDE.md`** (this file) — update the flavor table, reuse list, reward conventions, tool list, data generation notes, or curriculum as needed.
+2. **`README.md`** — update the environment table, flavor table, or repo structure section.
+
+Keep updates focused and minimal: only change what is actually stale. After updating, briefly note in your response what you changed and why.
+
+---
+
+<!-- Below: Generated verifiers API reference. Do not edit directly. -->
+
 # environments/AGENTS.md
 
 <!-- Generated for repository development workflows. Do not edit directly. -->

@@ -1,14 +1,4 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "networkx>=3.0",
-#     "verifiers>=0.1.9.post3",
-#     "datasets",
-#     "matplotlib>=3.7",
-# ]
-# ///
-
-"""CausalReasoningEnv_1 — Minimal Adjustment Set Identification.
+"""Flavor 1 — Minimal Adjustment Set Identification.
 
 Given a randomly generated DAG with a designated treatment node X and
 outcome node Y, the model must identify the minimal adjustment set Z:
@@ -21,9 +11,7 @@ at rollout start and injected into the prompt alongside the text description.
 
 import base64
 import io
-import json
 import pathlib
-import random
 import re
 
 import matplotlib
@@ -33,7 +21,12 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import verifiers as vf
 from datasets import Dataset
-from networkx.algorithms.d_separation import find_minimal_d_separator, is_d_separator
+from networkx.algorithms.d_separation import is_d_separator
+
+from data_generation.flavor1_gen import (
+    build_dataset,
+    generate_stratified_dag_problems,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,8 +48,7 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
     """Render a DAG as a base64-encoded PNG string.
 
     X (treatment) is drawn in blue, Y (outcome) in orange, all other nodes
-    in light gray. Labels use white text on colored nodes, black on gray.
-    Layout is topological so causal flow reads top-to-bottom.
+    in light gray. Layout is topological so causal flow reads top-to-bottom.
     """
     pos = _dag_layout(G)
 
@@ -68,7 +60,6 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
 
     node_size = 700
     nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_color=node_colors, node_size=node_size)
-    # connectionstyle curves edges so collinear nodes don't obscure long-range arrows
     nx.draw_networkx_edges(G, pos=pos, ax=ax, arrows=True, arrowsize=20,
                            edge_color="#555555", width=1.5,
                            node_size=node_size,
@@ -77,7 +68,6 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
         ax.text(x, y, str(node), ha="center", va="center",
                 fontsize=10, color=font_colors[node], fontweight="bold")
 
-    # Place legend outside the axes to avoid covering nodes
     ax.legend(handles=[
         mpatches.Patch(color="#4C72B0", label=f"X = {X}  (treatment)"),
         mpatches.Patch(color="#DD8452", label=f"Y = {Y}  (outcome)"),
@@ -94,198 +84,9 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DAG generation
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _make_dag(n: int, edge_prob: float, rng: random.Random) -> nx.DiGraph:
-    """Generate a random DAG by keeping only forward edges from an Erdos-Renyi graph."""
-    nodes = list(range(n))
-    edges = [
-        (u, v)
-        for u in nodes
-        for v in nodes
-        if u < v and rng.random() < edge_prob
-    ]
-    return nx.DiGraph(edges)
-
-
-def _try_sample_problem(
-    rng: random.Random,
-    min_nodes: int,
-    max_nodes: int,
-    edge_prob: float,
-) -> dict | None:
-    """Attempt to sample one valid causal adjustment-set problem.
-
-    Each accepted problem satisfies:
-      - Y is a descendant of X (a causal path exists).
-      - Y is a leaf node (no outgoing edges).
-      - At least 4 backdoor paths exist, with at least one of length ≥ 5 nodes.
-      - A minimal d-separator (adjustment set) exists.
-
-    Returns a problem dict (including a temporary "G" key for the nx.DiGraph
-    used by _classify_problem) or None if any filter fails.
-    """
-    n = rng.randint(min_nodes, max_nodes)
-    G = _make_dag(n, edge_prob, rng)
-    nodes_list = list(G.nodes())
-    if len(nodes_list) < 2:
-        return None
-
-    X, Y = rng.sample(nodes_list, 2)
-
-    # Y must be reachable from X
-    if not nx.has_path(G, X, Y):
-        return None
-    # Y must be a leaf
-    if G.out_degree(Y) > 0:
-        return None
-    # No back-path (should be impossible in a DAG, but guard anyway)
-    if nx.has_path(G, Y, X):
-        return None
-
-    # Backdoor graph: remove all edges out of X
-    G_bd = G.copy()
-    G_bd.remove_edges_from(list(G.out_edges(X)))
-
-    try:
-        bd_paths = list(nx.all_simple_paths(G_bd.to_undirected(), X, Y))
-        if len(bd_paths) < 4 or not any(len(p) >= 5 for p in bd_paths):
-            return None
-        min_set = find_minimal_d_separator(G_bd, X, Y)
-        if min_set is None:
-            return None
-    except Exception:
-        return None
-
-    return {
-        "G": G,  # temporary; removed before dataset serialisation
-        "edges": [(int(u), int(v)) for u, v in G.edges()],
-        "nodes": [int(nd) for nd in G.nodes()],
-        "X": int(X),
-        "Y": int(Y),
-        "minimal_adjustment_set": sorted(int(nd) for nd in min_set),
-        "num_nodes": len(nodes_list),
-        "num_backdoor_paths": len(bd_paths),
-    }
-
-
-def _classify_problem(problem: dict) -> str:
-    """Classify a problem by the mechanism behind its ratio (|min_set|/|parents(X)|).
-
-    Uses the temporary "G" key placed by _try_sample_problem.
-
-    Classifications:
-      "standard" — |min_set| >= |parents(X)|  (all parents needed; ratio ≥ 1)
-      "ancestor" — ratio < 1 AND there exists a dropped parent p such that some
-                   z ∈ min_set has a directed path z → … → p in G. This means
-                   z is an ancestor of p, and conditioning on z blocks p's
-                   backdoor contribution without conditioning on p itself.
-      "collider" — ratio < 1 AND no dropped parent has any ancestor in min_set.
-                   The redundancy arises from a collider structure on the backdoor
-                   path(s) through that parent, not from ancestor absorption.
-    """
-    G: nx.DiGraph = problem["G"]
-    X = problem["X"]
-    parents_X = set(G.predecessors(X))
-    min_set = set(problem["minimal_adjustment_set"])
-
-    if len(min_set) >= len(parents_X):
-        return "standard"
-
-    # ratio < 1: at least one parent was dropped from the minimal set
-    dropped_parents = parents_X - min_set
-    for p in dropped_parents:
-        ancestors_of_p = nx.ancestors(G, p)
-        if ancestors_of_p & min_set:
-            # Some node in min_set is an ancestor of dropped parent p —
-            # conditioning on that ancestor blocks p's confounding path too.
-            return "ancestor"
-
-    return "collider"
-
-
-def generate_stratified_dag_problems(
-    n_train: int = 250,
-    n_eval: int = 100,
-    min_nodes: int = 8,
-    max_nodes: int = 12,
-    edge_prob: float = 0.41,
-    seed: int = 42,
-    target_ratio_lt1: float = 0.40,
-    target_ancestor_fraction: float = 0.50,
-    exclude: set[tuple] | None = None,
-) -> tuple[list[dict], list[dict]]:
-    """Generate stratified train and eval problem pools with controlled difficulty.
-
-    Distribution targets (applied to both train and eval via stratified split):
-      - ~target_ratio_lt1 of all problems have |min_set| < |parents(X)|.
-      - Within those, ~target_ancestor_fraction are "ancestor" type (the rest
-        are "collider" type).
-
-    Args:
-        exclude: Optional set of (frozenset(edges), X, Y) signatures to reject,
-                 used to guarantee disjointness from an existing problem pool.
-
-    Returns:
-        (train_problems, eval_problems): two lists of problem dicts with keys:
-        edges, nodes, X, Y, minimal_adjustment_set, num_nodes,
-        num_backdoor_paths, num_parents_X, problem_type.
-    """
-    rng = random.Random(seed)
-    n_total = n_train + n_eval
-
-    n_lt1 = round(target_ratio_lt1 * n_total)
-    n_ancestor = round(target_ancestor_fraction * n_lt1)
-    n_collider = n_lt1 - n_ancestor
-    n_standard = n_total - n_lt1
-
-    targets = {"standard": n_standard, "ancestor": n_ancestor, "collider": n_collider}
-    buckets: dict[str, list[dict]] = {"standard": [], "ancestor": [], "collider": []}
-    seen: set[tuple] = set(exclude) if exclude else set()
-
-    while any(len(buckets[t]) < targets[t] for t in targets):
-        prob = _try_sample_problem(rng, min_nodes, max_nodes, edge_prob)
-        if prob is None:
-            continue
-
-        sig = (frozenset((int(u), int(v)) for u, v in prob["edges"]), prob["X"], prob["Y"])
-        if sig in seen:
-            continue
-
-        ptype = _classify_problem(prob)
-        if len(buckets[ptype]) >= targets[ptype]:
-            continue
-
-        G: nx.DiGraph = prob.pop("G")
-        parents_X = set(G.predecessors(prob["X"]))
-        prob["num_parents_X"] = len(parents_X)
-        prob["problem_type"] = ptype
-        buckets[ptype].append(prob)
-        seen.add(sig)
-
-    # Stratified split: each bucket contributes proportionally to train and eval
-    train_frac = n_train / n_total if n_total > 0 else 1.0
-    train_problems: list[dict] = []
-    eval_problems: list[dict] = []
-
-    for ptype in ("standard", "ancestor", "collider"):
-        probs = buckets[ptype]
-        rng.shuffle(probs)
-        n_to_train = round(len(probs) * train_frac)
-        train_problems.extend(probs[:n_to_train])
-        eval_problems.extend(probs[n_to_train:])
-
-    rng.shuffle(train_problems)
-    rng.shuffle(eval_problems)
-
-    return train_problems, eval_problems
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Prompt construction
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 _SYSTEM_PROMPT_BASE = """\
 You are an expert in causal inference and graphical models.
@@ -421,7 +222,7 @@ The minimal adjustment set is therefore {0, 1, 3}.
 </reasoning>
 <answer>{0, 1, 3}</answer>"""
 
-SYSTEM_PROMPT_1 = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
+SYSTEM_PROMPT = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
 
 # Pre-render the second ICL example's DAG at module load time so it can be
 # injected into the system message at rollout time without re-computing it.
@@ -438,7 +239,6 @@ _ICL_EXAMPLE_2_B64 = _render_dag_b64(_ICL2_G, X=4, Y=8)
 
 def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
     """Render a DAG problem as a readable string for the model."""
-    # Build parent/child lookup
     parents: dict[int, list[int]] = {n: [] for n in nodes}
     children: dict[int, list[int]] = {n: [] for n in nodes}
     for u, v in edges:
@@ -555,50 +355,21 @@ async def valid_adjustment_set(completion, info) -> float:
     G.add_nodes_from(info["nodes"])
     G.add_edges_from(info["edges"])
 
-    # Descendant check: no node in Z may be a descendant of X
     if predicted & nx.descendants(G, X):
         return 0.0
 
-    # Build backdoor graph: remove all outgoing edges from X
     G_bd = G.copy()
     G_bd.remove_edges_from(list(G.out_edges(X)))
 
-    # D-separation check
     return 1.0 if is_d_separator(G_bd, {X}, {Y}, predicted) else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dataset builder
+# Environment class
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_dataset(problems: list[dict]) -> Dataset:
-    """Convert a list of problem dicts into a HuggingFace Dataset."""
-    rows = []
-    for p in problems:
-        rows.append({
-            "question": format_problem(p["edges"], p["nodes"], p["X"], p["Y"]),
-            "info": json.dumps({
-                "minimal_adjustment_set": p["minimal_adjustment_set"],
-                "X": p["X"],
-                "Y": p["Y"],
-                "edges": p["edges"],
-                "nodes": p["nodes"],
-                "num_nodes": p["num_nodes"],
-                "num_backdoor_paths": p["num_backdoor_paths"],
-                "num_parents_X": p.get("num_parents_X"),
-                "problem_type": p.get("problem_type"),
-            }),
-        })
-    return Dataset.from_list(rows)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Environment subclass
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class CausalReasoningEnv(vf.SingleTurnEnv):
+class Flavor1Env(vf.SingleTurnEnv):
     """SingleTurnEnv that renders each DAG as a PNG and injects it into the prompt.
 
     setup_state runs once at the start of each rollout. It reconstructs the
@@ -617,8 +388,7 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
 
         prompt = list(state["prompt"])
 
-        # Upgrade system message to multimodal: append the ICL example 2 DAG image
-        # so the model sees the visual alongside the worked example text.
+        # Upgrade system message to multimodal: append the ICL example 2 DAG image.
         sys_idx = next((i for i, m in enumerate(prompt) if m["role"] == "system"), None)
         if sys_idx is not None and isinstance(prompt[sys_idx]["content"], str):
             prompt[sys_idx] = {
@@ -629,7 +399,7 @@ class CausalReasoningEnv(vf.SingleTurnEnv):
                 ],
             }
 
-        # Locate the last user message and upgrade its content to [text, image]
+        # Upgrade last user message to [text, image].
         last_user_idx = max(i for i, m in enumerate(prompt) if m["role"] == "user")
         original_text = prompt[last_user_idx]["content"]
         prompt[last_user_idx] = {
@@ -655,28 +425,20 @@ _MIN_NODES = 8
 _MAX_NODES = 12
 _SEED = 42
 
-# Paths where __main__ saves and load_environment() can load from.
-_DATASET_DIR = pathlib.Path(__file__).parent / "datasets"
+_DATASET_DIR = pathlib.Path(__file__).parent / "datasets" / "flavor1"
 _TRAIN_DATASET_PATH = _DATASET_DIR / "train"
 _EVAL_DATASET_PATH = _DATASET_DIR / "eval"
 
 
-def load_environment(
+def load_flavor1(
     train_dataset: Dataset | None = None,
     eval_dataset: Dataset | None = None,
-) -> vf.Environment:
-    """Load the CausalReasoningEnv_1 environment.
+) -> Flavor1Env:
+    """Load the Flavor 1 environment (adjustment set identification).
 
     If datasets are not passed, attempts to auto-load pre-built datasets from
     disk. If no datasets exist on disk, generates them from scratch (slow; run
-    __main__ to pre-build and save them).
-
-    Args:
-        train_dataset: Pre-built HuggingFace Dataset for training.
-        eval_dataset: Pre-built HuggingFace Dataset for evaluation.
-
-    Auto-load example (reads from disk if available):
-        env = load_environment()
+    this module as __main__ to pre-build and save them).
     """
     from datasets import load_from_disk
 
@@ -694,19 +456,19 @@ def load_environment(
             seed=_SEED,
         )
         if train_dataset is None:
-            train_dataset = build_dataset(train_problems)
+            train_dataset = build_dataset(train_problems, format_problem)
         if eval_dataset is None:
-            eval_dataset = build_dataset(eval_problems)
+            eval_dataset = build_dataset(eval_problems, format_problem)
 
     rubric = vf.Rubric(
         funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
         weights=[0.9, 0.0, 0.1],
     )
 
-    return CausalReasoningEnv(
+    return Flavor1Env(
         dataset=train_dataset,
         eval_dataset=eval_dataset,
-        system_prompt=SYSTEM_PROMPT_1,
+        system_prompt=SYSTEM_PROMPT,
         rubric=rubric,
     )
 
@@ -715,7 +477,6 @@ if __name__ == "__main__":
     import base64 as _b64
     from collections import Counter
 
-    # ── Generate stratified train + eval pools ────────────────────────────────
     print(f"Generating stratified problems (seed={_SEED}, nodes={_MIN_NODES}–{_MAX_NODES})…")
     train_problems, eval_problems = generate_stratified_dag_problems(
         n_train=_NUM_TRAIN,
@@ -730,62 +491,11 @@ if __name__ == "__main__":
         counts = Counter(p["problem_type"] for p in probs)
         print(f"  {split_name} type distribution: {dict(counts)}")
 
-    # ── Build and save HuggingFace Datasets to disk ───────────────────────────
-    train_dataset = build_dataset(train_problems)
-    eval_dataset = build_dataset(eval_problems)
+    train_dataset = build_dataset(train_problems, format_problem)
+    eval_dataset = build_dataset(eval_problems, format_problem)
 
     _DATASET_DIR.mkdir(parents=True, exist_ok=True)
     train_dataset.save_to_disk(str(_TRAIN_DATASET_PATH))
     eval_dataset.save_to_disk(str(_EVAL_DATASET_PATH))
     print(f"\nTrain dataset ({len(train_dataset)} rows) saved → {_TRAIN_DATASET_PATH}")
     print(f"Eval  dataset ({len(eval_dataset)} rows) saved → {_EVAL_DATASET_PATH}\n")
-
-    # ── Build signature set for ICL exclusion ────────────────────────────────
-    all_sigs: set[tuple] = {
-        (frozenset((int(u), int(v)) for u, v in p["edges"]), p["X"], p["Y"])
-        for p in train_problems + eval_problems
-    }
-
-    # ── Generate 2 ICL examples disjoint from train+eval ─────────────────────
-    _ICL_SEED = 77
-    print(f"Generating ICL examples (seed={_ICL_SEED})…")
-    icl_rng = random.Random(_ICL_SEED)
-    icl_problems: list[dict] = []
-    while len(icl_problems) < 2:
-        prob = _try_sample_problem(icl_rng, _MIN_NODES, _MAX_NODES, 0.41)
-        if prob is None:
-            continue
-        sig = (frozenset((int(u), int(v)) for u, v in prob["edges"]), prob["X"], prob["Y"])
-        if sig in all_sigs:
-            continue
-        ptype = _classify_problem(prob)
-        G_icl: nx.DiGraph = prob.pop("G")
-        parents_X_icl = set(G_icl.predecessors(prob["X"]))
-        prob["num_parents_X"] = len(parents_X_icl)
-        prob["problem_type"] = ptype
-        icl_problems.append(prob)
-        all_sigs.add(sig)
-
-    print(f"ICL examples: {len(icl_problems)} unique problems (seed={_ICL_SEED})\n")
-
-    for i, p in enumerate(icl_problems):
-        edges_str = ", ".join(f"{u}→{v}" for u, v in sorted(p["edges"]))
-        print(f"{'='*70}")
-        print(f"ICL Example {i + 1}")
-        print(f"{'='*70}")
-        print(f"  nodes                  = {sorted(p['nodes'])}")
-        print(f"  edges                  = {edges_str}")
-        print(f"  X={p['X']}, Y={p['Y']}")
-        print(f"  minimal_adjustment_set = {p['minimal_adjustment_set']}")
-        print(f"  num_parents_X={p['num_parents_X']}, problem_type={p['problem_type']}")
-        print(f"  num_nodes={p['num_nodes']}, num_backdoor_paths={p['num_backdoor_paths']}")
-        print(f"  formatted problem:")
-        print(format_problem(p["edges"], p["nodes"], p["X"], p["Y"]))
-
-        G_print = nx.DiGraph()
-        G_print.add_nodes_from(p["nodes"])
-        G_print.add_edges_from(p["edges"])
-        img_path = f"./icl_example_{i + 1}.png"
-        with open(img_path, "wb") as fh:
-            fh.write(_b64.b64decode(_render_dag_b64(G_print, p["X"], p["Y"])))
-        print(f"  DAG image saved → {img_path}\n")
