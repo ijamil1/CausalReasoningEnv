@@ -1,60 +1,44 @@
 # CausalReasoningEnv
 
-A workspace for building causal reasoning RL training environments and benchmarks using Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
+A workspace for building causal reasoning RL training environments using Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
 
-The long-term goal is a **five-flavor causal reasoning benchmark** that tests end-to-end causal analysis competency — from reading DAGs and applying d-separation, to estimating ATEs from data and writing identification formulas — paired with a multi-turn tool-use training environment (`CausalReasoningEnv_2`) that trains models toward this benchmark.
+The goal is a **four-flavor causal reasoning benchmark** paired with a multi-turn tool-use training environment that trains models toward it. See [`BENCHMARK_DESIGN.md`](BENCHMARK_DESIGN.md) for the full design rationale, data generation specs, prompt sketches, and reward rubrics.
 
-## Setup
+## Environment
 
-```bash
-# Install dependencies
-uv sync
-
-# Install an environment locally
-prime env install CausalReasoningEnv_1
-```
-
-## Environments
-
-| Environment | Status | Description |
-| ----------- | ------ | ----------- |
-| [CausalReasoningEnv_1](environments/CausalReasoningEnv_1/) | ✅ Built | Single-turn environment: given a DAG, identify the minimal adjustment set that blocks all backdoor paths from treatment X to outcome Y. Problems are stratified by difficulty (standard, collider, ancestor). |
-| CausalReasoningEnv_2 | 🚧 Planned | Multi-turn tool-use environment covering all five benchmark flavors via `vf.EnvGroup`. Uses Python execution tools for estimation tasks and graph tools (d-separation check, adjustment set finder) for identification tasks. |
-
-## Benchmark Design — Five Flavors
-
-See [BENCHMARK_DESIGN.md](BENCHMARK_DESIGN.md) for full design rationale, data generation specs, prompt sketches, and reward rubric definitions.
-
-| Flavor | Task | Key Skill Tested |
-| ------ | ---- | ---------------- |
-| 1 — Adjustment Set | Given DAG + X, Y: find minimal adjustment set | d-separation, backdoor criterion, collider logic |
-| 2 — ATE from Data | Given DAG + observational data: estimate ATE/CATE numerically | Identification + estimation pipeline; tool-use for regression |
-| 3 — Analytical ATE | Given DAG + fully specified SCM: compute exact E[Y\|do(X=x)] | do() operator, graph mutilation, causal vs. observational conditioning |
-| 4 — Estimate SCM | Given DAG + data: estimate structural equations | Causal Markov condition; regress on parents, not correlated variables |
-| 5 — Identification Formula | Given DAG + equation forms (no params): write backdoor adjustment formula | Symbolic identification; express E[Y\|do(X=x)] as observable distribution |
-
-## Usage
-
-```bash
-# Run evaluation
-prime eval run CausalReasoningEnv_1
-
-# Run evaluation with a specific model
-prime eval run CausalReasoningEnv_1 -m openai/gpt-4.1-mini -n 50
-
-# Push to Prime Hub
-prime env push -p ./environments/CausalReasoningEnv_1
-```
+→ **[`environments/CausalReasoningEnv/`](environments/CausalReasoningEnv/)** — the main package. See its [README](environments/CausalReasoningEnv/README.md) for what's implemented, how to install, and how to run eval.
 
 ## Repository Structure
 
 ```
 environments/
-  CausalReasoningEnv_1/   # Flavor 1: adjustment set identification (built)
-  CausalReasoningEnv_2/   # All 5 flavors via EnvGroup (planned)
+  CausalReasoningEnv/         # Main package — load_environment(weights) → vf.EnvGroup
+    CausalReasoningEnv.py     #   Entry point; routes weights to active flavor sub-envs
+    flavor1.py                #   Flavor 1: adjustment set identification (fully implemented)
+    flavor2.py                #   Flavor 2: ATE from observational data (stub)
+    flavor3.py                #   Flavor 3: analytical ATE from SCM (stub)
+    flavor4.py                #   Flavor 4: estimate SCM from data (stub)
+    data_generation/
+      flavor1_gen.py          #   DAG generation + dataset builder for Flavor 1
+      flavor2_gen.py          #   stub
+      flavor3_gen.py          #   stub
+      flavor4_gen.py          #   stub
+    pyproject.toml
+    README.md
+
 configs/
-  vf-rl/                  # Training configs (TOML)
-  endpoints.py            # Model endpoint shorthands
-  zero3.yaml              # DeepSpeed ZeRO-3 config
-BENCHMARK_DESIGN.md       # Full benchmark and training env design doc
+  lab/
+    phase1.toml               # Curriculum phase 1: Flavor 1 only
+    phase2.toml               # Curriculum phase 2: Flavors 1 + 3
+    phase3.toml               # Curriculum phase 3: Flavors 1 + 3 + 2
+    phase4.toml               # Curriculum phase 4: all four flavors
+
+BENCHMARK_DESIGN.md           # Full benchmark and training environment design doc
+```
+
+## Setup
+
+```bash
+uv sync
+prime env install CausalReasoningEnv
 ```
