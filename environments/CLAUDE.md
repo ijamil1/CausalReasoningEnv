@@ -2,29 +2,33 @@
 
 ## Project Context: Causal Reasoning Benchmark
 
-This repo builds a **five-flavor causal reasoning benchmark** and paired RL training environments. Read [BENCHMARK_DESIGN.md](../BENCHMARK_DESIGN.md) for full design rationale before modifying any environment.
+This repo builds a **four-flavor causal reasoning benchmark** and paired RL training environment. Read [BENCHMARK_DESIGN.md](../BENCHMARK_DESIGN.md) for full design rationale before modifying any environment.
 
 ### Environments
 
-| Dir | Status | Flavor(s) |
-|-----|--------|-----------|
-| `CausalReasoningEnv_1/` | ✅ Built | Flavor 1 — Adjustment Set Identification |
-| `CausalReasoningEnv_2/` | 🚧 Planned | Flavors 1–5 via `vf.EnvGroup` |
+| Dir | Status | Description |
+|-----|--------|-------------|
+| `CausalReasoningEnv/` | ✅ Scaffolded | Single package: `load_environment(weights)` returns a `vf.EnvGroup` over up to 4 flavors. Flavor 1 fully implemented; Flavors 2–4 are stubs. |
 
-### Five Benchmark Flavors
+### Four Benchmark Flavors
 
-1. **Adjustment Set** — Given DAG + X, Y: find minimal valid Z blocking all backdoor paths.
-2. **ATE from Data** — Given DAG + observational CSV: estimate ATE/CATE numerically (tool use required).
-3. **Analytical ATE** — Given DAG + fully specified SCM: compute exact E[Y|do(X=x)].
-4. **Estimate SCM** — Given DAG + data: estimate structural equations by regressing each node on its causal parents.
-5. **Identification Formula** — Given DAG + equation forms (no params): write the backdoor adjustment formula symbolically.
+Weight index order in `load_environment(weights=[w0, w1, w2, w3])`:
 
-### Key Reuse from CausalReasoningEnv_1
+| Index | Flavor | Status | Task |
+|-------|--------|--------|------|
+| 0 | **Flavor 1 — Adjustment Set** | ✅ Implemented | Given DAG + X, Y: find minimal valid Z blocking all backdoor paths. |
+| 1 | **Flavor 3 — Analytical ATE** | 🚧 Stub | Given DAG + fully specified SCM: compute exact E[Y\|do(X=x)] analytically. |
+| 2 | **Flavor 2 — ATE from Data** | 🚧 Stub | Given DAG + observational CSV: estimate ATE/CATE by stratified counting (tool use). |
+| 3 | **Flavor 4 — Estimate SCM** | 🚧 Stub | Given DAG + data: estimate structural equations by regressing each node on its causal parents. |
 
-When building CausalReasoningEnv_2, reuse (don't rewrite) these from [CausalReasoningEnv_1.py](CausalReasoningEnv_1/CausalReasoningEnv_1.py):
-- `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` — DAG generation
-- `_render_dag_b64`, `format_problem` — DAG visualization/text rendering
-- `valid_adjustment_set`, `parse_answer` — reward function primitives
+Note: weight index order is [F1, F3, F2, F4] — matching curriculum progression (simpler flavors first).
+
+### Key Functions in CausalReasoningEnv/
+
+When implementing Flavors 2–4, reuse these from [flavor1.py](CausalReasoningEnv/flavor1.py) and [data_generation/flavor1_gen.py](CausalReasoningEnv/data_generation/flavor1_gen.py):
+- `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` — DAG generation (in `flavor1_gen.py`)
+- `_render_dag_b64`, `format_problem` — DAG visualization/text rendering (in `flavor1.py`)
+- `valid_adjustment_set`, `parse_answer` — reward function primitives (in `flavor1.py`)
 
 ### Reward Rubric Conventions (all flavors)
 
@@ -34,9 +38,9 @@ Rubrics use 4 layers with these canonical weights:
 - **Layer 3 — Answer correctness:** `weight=0.80` (flavor-specific; see BENCHMARK_DESIGN.md for per-flavor scoring)
 - **Layer 4 — Monitoring metrics:** `weight=0` (tool usage, num_tool_calls, intermediate correctness)
 
-### Tools for CausalReasoningEnv_2
+### Tools for CausalReasoningEnv (Flavors 2–4)
 
-Five tools are specified in BENCHMARK_DESIGN.md:
+Five tools are specified in BENCHMARK_DESIGN.md; implement in `CausalReasoningEnv.py` or per-flavor files:
 - `check_d_separation(edges, X, Y, Z)` — available in both training and eval
 - `find_adjustment_sets(edges, X, Y)` — **training only**; remove or penalize in eval (gives away the answer)
 - `get_descendants(edges, node)` — available in both
@@ -47,24 +51,25 @@ Five tools are specified in BENCHMARK_DESIGN.md:
 
 - **DAG structure:** Random DAGs with stratification (standard / collider / ancestor difficulty)
 - **Flavor 1:** Enumerate *all* minimal adjustment sets at generation time; store as `all_minimal_adjustment_sets: list[list[int]]` in `info`
-- **Flavors 2/4:** Linear Gaussian SCM, N=2000 rows, standardize all variables at generation time
-- **Flavor 3:** 75% linear SCM, 25% nonlinear (tanh/quadratic); simulation ATE via 1M samples
-- **Flavor 5:** Fully observed DAGs only; canonical formula stored as text; graded by numeric instantiation
+- **Flavors 2/4:** Nonlinear SCM, discrete variables, N=2000 rows; true ATE via exact enumeration
+- **Flavor 3:** 75% linear SCM, 25% nonlinear (tanh/quadratic); true ATE via 1M-sample simulation
 
 ### Training Curriculum
 
-Build CausalReasoningEnv_2 to support a 5-phase curriculum:
-1. Flavor 1 only (graph reasoning warm-up)
-2. + Flavor 3 (do() operator with exact answers)
-3. + Flavor 5 (symbolic identification)
-4. + Flavor 2 (data → ATE, tool use)
-5. + Flavor 4 (full end-to-end pipeline)
+`CausalReasoningEnv` supports a 4-phase curriculum via `weights` arg. Configs live in `configs/lab/`:
+
+| Config | Weights [F1, F3, F2, F4] | Active Flavors |
+|--------|--------------------------|----------------|
+| `configs/lab/phase1.toml` | `[1.0, 0.0, 0.0, 0.0]` | F1 only — graph reasoning warm-up |
+| `configs/lab/phase2.toml` | `[0.4, 0.6, 0.0, 0.0]` | F1 + F3 — add do() operator |
+| `configs/lab/phase3.toml` | `[0.3, 0.4, 0.3, 0.0]` | F1 + F3 + F2 — add data/tool use |
+| `configs/lab/phase4.toml` | `[0.25, 0.3, 0.25, 0.2]` | All four flavors |
 
 Phase out `find_adjustment_sets` tool after Phase 1 convergence to force internalized graph reasoning.
 
-### New Dependencies for CausalReasoningEnv_2
+### Dependencies
 
-Add to `pyproject.toml`: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
+Current `pyproject.toml` includes `networkx`, `matplotlib`, `Pillow` (Flavor 1). Add for Flavors 2–4: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
 
 ### Self-Maintenance Rule
 

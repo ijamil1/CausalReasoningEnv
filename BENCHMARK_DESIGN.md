@@ -565,59 +565,56 @@ prime train --config configs/vf-rl/phase2.toml --resume checkpoints/step_XXXX/
 
 ### Repository and package rename
 
-- Rename repo: `CausalReasoningEnv_1` → `CausalReasoningEnv` (update on GitHub)
-- Rename existing environment folder: `environments/CausalReasoningEnv_1/` → `environments/CausalReasoningFlavor1/` (temporary — see migration plan below)
+- ✅ [2026-02-27] Rename repo: `CausalReasoningEnv_1` → `CausalReasoningEnv` (updated on GitHub; README updated)
+- ✅ [2026-02-27] Remove `environments/CausalReasoningEnv_1/` (code migrated directly into `environments/CausalReasoningEnv/` — skipped intermediate `CausalReasoningFlavor1/` step)
 
 ### Target file structure
+
+✅ [2026-02-27] File structure created:
 
 ```
 environments/
   CausalReasoningEnv/                    ← new main package
-    pyproject.toml
-    CausalReasoningEnv.py                ← load_environment() → EnvGroup
-    flavor1.py                           ← Flavor1Env + load_flavor1()
-    flavor2.py                           ← Flavor2Env + load_flavor2()
-    flavor3.py                           ← Flavor3Env + load_flavor3()
-    flavor4.py                           ← Flavor4Env + load_flavor4()
+    pyproject.toml                       ✅ created
+    CausalReasoningEnv.py                ← load_environment() → EnvGroup  ✅ created
+    flavor1.py                           ← Flavor1Env + load_flavor1()  ✅ created (migrated from CausalReasoningEnv_1)
+    flavor2.py                           ← Flavor2Env + load_flavor2()  ✅ stub created
+    flavor3.py                           ← Flavor3Env + load_flavor3()  ✅ stub created
+    flavor4.py                           ← Flavor4Env + load_flavor4()  ✅ stub created
     data_generation/
-      flavor1_gen.py
-      flavor2_gen.py
-      flavor3_gen.py
-      flavor4_gen.py
-
-  CausalReasoningFlavor1/                ← renamed from CausalReasoningEnv_1
-    pyproject.toml                       ← kept temporarily during migration
-    CausalReasoningFlavor1.py
+      flavor1_gen.py                     ✅ created (generation logic ported from original)
+      flavor2_gen.py                     ✅ stub created
+      flavor3_gen.py                     ✅ stub created
+      flavor4_gen.py                     ✅ stub created
 ```
 
 ### Migration plan for CausalReasoningFlavor1
 
-1. Rename `environments/CausalReasoningEnv_1/` → `environments/CausalReasoningFlavor1/`
-2. Build `environments/CausalReasoningEnv/flavor1.py` by refactoring code from `CausalReasoningFlavor1/`:
-   - Port `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` → `data_generation/flavor1_gen.py`
-   - Port `Flavor1Env` class + `load_flavor1()` → `flavor1.py`
-   - Port `_render_dag_b64`, `format_problem`, `valid_adjustment_set`, `parse_answer` → shared utils or inline
-3. Verify `flavor1.py` produces equivalent behavior to the original
-4. Delete `environments/CausalReasoningFlavor1/` once migration is verified
+- ✅ [2026-02-27] Port `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` → `data_generation/flavor1_gen.py`
+- ✅ [2026-02-27] Port `Flavor1Env` class + `load_flavor1()` → `flavor1.py`
+- ✅ [2026-02-27] Port `_render_dag_b64`, `format_problem`, `valid_adjustment_set`, `parse_answer` → inline in `flavor1.py`
+- ✅ [2026-02-27] Delete `environments/CausalReasoningEnv_1/`
+- [ ] Verify `flavor1.py` produces equivalent reward behavior to the original (run `prime eval` spot-check)
 
 ### New files to create
-- `environments/CausalReasoningEnv/CausalReasoningEnv.py`
-- `environments/CausalReasoningEnv/pyproject.toml`
-- `environments/CausalReasoningEnv/flavor1.py` through `flavor4.py`
-- `environments/CausalReasoningEnv/data_generation/flavor1_gen.py` through `flavor4_gen.py`
-- `configs/vf-rl/phase1.toml` — F1 only (`weights: [1.0, 0.0, 0.0, 0.0]`)
-- `configs/vf-rl/phase2.toml` — F1 + F3 (`weights: [0.4, 0.6, 0.0, 0.0]`)
-- `configs/vf-rl/phase3.toml` — F1 + F3 + F2 (`weights: [0.3, 0.4, 0.3, 0.0]`)
-- `configs/vf-rl/phase4.toml` — all flavors (`weights: [0.25, 0.3, 0.25, 0.2]`)
+- ✅ [2026-02-27] `environments/CausalReasoningEnv/CausalReasoningEnv.py`
+- ✅ [2026-02-27] `environments/CausalReasoningEnv/pyproject.toml`
+- ✅ [2026-02-27] `environments/CausalReasoningEnv/flavor1.py` through `flavor4.py`
+- ✅ [2026-02-27] `environments/CausalReasoningEnv/data_generation/flavor1_gen.py` through `flavor4_gen.py`
+- ✅ [2026-02-27] `configs/lab/phase1.toml` — F1 only (`weights: [1.0, 0.0, 0.0, 0.0]`)
+- ✅ [2026-02-27] `configs/lab/phase2.toml` — F1 + F3 (`weights: [0.4, 0.6, 0.0, 0.0]`)
+- ✅ [2026-02-27] `configs/lab/phase3.toml` — F1 + F3 + F2 (`weights: [0.3, 0.4, 0.3, 0.0]`)
+- ✅ [2026-02-27] `configs/lab/phase4.toml` — all flavors (`weights: [0.25, 0.3, 0.25, 0.2]`)
+- Note: configs placed in `configs/lab/` (not `configs/vf-rl/`) — update path references if needed
 
 ### New dependencies needed
-- `scipy`, `pandas`, `statsmodels` — data generation and estimation
-- `sympy` — optional symbolic SCM manipulation (Flavor 3 linear case)
+- [ ] `scipy`, `pandas`, `statsmodels` — data generation and estimation (needed for Flavors 2–4)
+- [ ] `sympy` — optional symbolic SCM manipulation (Flavor 3 linear case)
 
 ### Verification plan
-1. `python -c "from CausalReasoningEnv import load_environment; env = load_environment(); print(env)"` — confirms environment loads
-2. `prime eval run CausalReasoningEnv -a '{"weights": [1.0, 0.0, 0.0, 0.0]}' -n 10 -m openai/gpt-4.1-mini` — spot-check F1 reward matches original
-3. `prime eval run CausalReasoningEnv -n 10 -m openai/gpt-4.1-mini` — spot-check reward distributions per flavor (all phases)
-4. Manually inspect 5 problems per flavor: verify ground truth ATEs match simulation, verify prompts are parseable
-5. Check reward function edge cases: empty adjustment set, unparseable answers, zero-variance outcomes
-6. Confirm `vf.EnvGroup` routes to correct sub-environment and aggregates metrics correctly
+- [ ] `python -c "from CausalReasoningEnv import load_environment; env = load_environment(); print(env)"` — confirms environment loads
+- [ ] `prime eval run CausalReasoningEnv -a '{"weights": [1.0, 0.0, 0.0, 0.0]}' -n 10 -m openai/gpt-4.1-mini` — spot-check F1 reward matches original
+- [ ] `prime eval run CausalReasoningEnv -n 10 -m openai/gpt-4.1-mini` — spot-check reward distributions per flavor (all phases)
+- [ ] Manually inspect 5 problems per flavor: verify ground truth ATEs match simulation, verify prompts are parseable
+- [ ] Check reward function edge cases: empty adjustment set, unparseable answers, zero-variance outcomes
+- [ ] Confirm `vf.EnvGroup` routes to correct sub-environment and aggregates metrics correctly
