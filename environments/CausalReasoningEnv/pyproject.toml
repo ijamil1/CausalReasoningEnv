@@ -1,6 +1,6 @@
 [project]
 name = "CausalReasoningEnv"
-description = "Multi-flavor causal reasoning benchmark and training environment: adjustment set identification, ATE estimation, SCM derivation, and structural equation fitting."
+description = "Multi-task causal reasoning benchmark and training environment: adjustment set identification, ATE estimation, SCM derivation, and structural equation fitting."
 tags = ["reasoning", "causal-reasoning", "graph-reasoning", "multi-turn", "train", "eval"]
 version = "0.1.0"
 requires-python = ">=3.12"
@@ -25,7 +25,7 @@ include = [
     "flavor2.py",
     "flavor3.py",
     "flavor4.py",
-    "data_generation/",
+    "prompts.py",
     "pyproject.toml",
 ]
 

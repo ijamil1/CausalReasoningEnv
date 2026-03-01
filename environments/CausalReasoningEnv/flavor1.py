@@ -22,10 +22,6 @@ import networkx as nx
 import verifiers as vf
 from networkx.algorithms.d_separation import is_d_separator
 
-from data_generation.flavor1_gen import (
-    build_dataset,
-    generate_stratified_dag_problems,
-)
 from prompts import build_system_prompt
 
 
@@ -426,6 +422,10 @@ def load_flavor1() -> Flavor1Env:
 
 if __name__ == "__main__":
     from collections import Counter
+    from data_generation.flavor1_gen import (
+        build_dataset,
+        generate_stratified_dag_problems,
+    )
 
     print(f"Generating stratified problems (seed={_SEED}, nodes={_MIN_NODES}–{_MAX_NODES})…")
     train_problems, eval_problems = generate_stratified_dag_problems(
