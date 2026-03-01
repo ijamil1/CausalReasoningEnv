@@ -70,22 +70,26 @@ def format_problem(
         ch = sorted(children[n])
         kind = "latent" if n in latent_nodes else "observed"
         adj_lines.append(
-            f"  Node {n} ({kind}): parents=[{', '.join(map(str, pa))}]  "
+            f"  Node {n} ({kind}): parents=[{', '.join(map(str, pa))}], "
             f"children=[{', '.join(map(str, ch))}]"
         )
     adj_str = "\n".join(adj_lines)
 
     return (
-        f"Here is the textual representation of the DAG:\n"
-        f"Nodes: {node_str}\n"
-        f"Observed nodes: {obs_str}\n"
-        f"Latent nodes: {lat_str}\n"
-        f"Edges: {edge_str}\n\n"
+        f"DAG:\n"
+        f"Nodes:    {node_str}\n"
+        f"Observed: {obs_str}\n"
+        f"Latent:   {lat_str}\n"
+        f"Edges:    {edge_str}\n\n"
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
-        f"What is the minimal adjustment set Z that blocks all backdoor "
-        f"paths from {X} to {Y}? Only nodes in the observed set may be included in Z.\n"
+        f"Determine whether the average treatment effect "
+        f"ATE = E[Y | do(X=1)] − E[Y | do(X=0)] is identifiable from the "
+        f"observed variables. If it is, state the identification method and "
+        f"the required variables. If it is not, respond with not_identifiable in the answer tags. RESPOND ACCORDING TO THE RESPONSE FORMAT SPECIFIED EARLIER.\n\n"
+        f"A visual rendering of this DAG is also provided "
+        f"(blue = X, orange = Y, gray = observed, purple = latent)."
     )
 
 
