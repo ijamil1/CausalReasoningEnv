@@ -27,6 +27,7 @@ from data_generation.flavor1_gen import (
     build_dataset,
     generate_stratified_dag_problems,
 )
+from prompts import build_system_prompt
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,17 +45,32 @@ def _dag_layout(G: nx.DiGraph) -> dict:
     return pos
 
 
-def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> str:
+def _render_dag_b64(
+    G: nx.DiGraph,
+    X: int,
+    Y: int,
+    latent_nodes: set[int] | None = None,
+    figsize=(8, 6),
+    dpi=100,
+) -> str:
     """Render a DAG as a base64-encoded PNG string.
 
-    X (treatment) is drawn in blue, Y (outcome) in orange, all other nodes
-    in light gray. Layout is topological so causal flow reads top-to-bottom.
+    X (treatment) is blue, Y (outcome) is orange, latent nodes are light
+    purple with an italic "(L)" label suffix, observed nodes are gray.
+    Layout is topological so causal flow reads top-to-bottom.
     """
+    latent_nodes = set(latent_nodes) if latent_nodes else set()
     pos = _dag_layout(G)
 
-    node_colors = ["#4C72B0" if n == X else "#DD8452" if n == Y else "#C8C8C8"
-                   for n in G.nodes()]
+    def _color(n):
+        if n == X:       return "#4C72B0"
+        if n == Y:       return "#DD8452"
+        if n in latent_nodes: return "#D4B8E0"  # light purple
+        return "#C8C8C8"
+
+    node_colors = [_color(n) for n in G.nodes()]
     font_colors = {n: "white" if n in (X, Y) else "black" for n in G.nodes()}
+    labels = {n: f"{n}(L)" if n in latent_nodes else str(n) for n in G.nodes()}
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
@@ -65,14 +81,18 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
                            node_size=node_size,
                            connectionstyle="arc3,rad=0.15")
     for node, (x, y) in pos.items():
-        ax.text(x, y, str(node), ha="center", va="center",
-                fontsize=10, color=font_colors[node], fontweight="bold")
+        ax.text(x, y, labels[node], ha="center", va="center",
+                fontsize=9, color=font_colors[node], fontweight="bold")
 
-    ax.legend(handles=[
+    legend_handles = [
         mpatches.Patch(color="#4C72B0", label=f"X = {X}  (treatment)"),
         mpatches.Patch(color="#DD8452", label=f"Y = {Y}  (outcome)"),
-        mpatches.Patch(color="#C8C8C8", label="other nodes"),
-    ], loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=9)
+        mpatches.Patch(color="#C8C8C8", label="observed"),
+    ]
+    if latent_nodes:
+        legend_handles.append(mpatches.Patch(color="#D4B8E0", label="latent (L)"))
+    ax.legend(handles=legend_handles, loc="upper left",
+              bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=9)
     ax.set_title("Causal DAG", fontsize=12)
     ax.axis("off")
 
@@ -88,156 +108,41 @@ def _render_dag_b64(G: nx.DiGraph, X: int, Y: int, figsize=(8, 6), dpi=100) -> s
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-_SYSTEM_PROMPT_BASE = """\
-You are an expert in causal inference and graphical models.
+_F1_INTRO = """\
+You will be given a Directed Acyclic Graph (DAG) representing a structural \
+causal model, along with a visual rendering of the same graph. Nodes are \
+variables. Nodes may be observed or latent/unobserved. A directed edge A→B means A is a direct cause of B.\
+"""
 
-You will be given a Directed Acyclic Graph (DAG) representing a structural causal model. \
-You will be given both a textual and an image representation of the DAG. \
-The textual representation describes the graph as a list of \
-directed edges, a treatment node X, and an outcome node Y.
+_F1_RESPONSE_FORMAT = """\
+RESPONSE FORMAT
+────────────────
+You must follow the following format exactly. Write all reasoning inside a <reasoning> block. After </reasoning>, write \
+exactly one <answer> block using one of these three forms:
 
-BACKGROUND
-----------
-A **backdoor path** from X to Y is any path in the graph that begins with \
-an arrow INTO X (i.e., it "sneaks around" the front-door causal path). \
-Backdoor paths create confounding bias when estimating the causal effect of X on Y.
+  Backdoor (adjustment set, including empty set):
+      <answer>{N1, N2, ...}</answer>   or   <answer>{}</answer>
 
-An **adjustment set** Z is a set of non-descendants of X such that, when we \
-condition on Z, all backdoor paths between X and Y are blocked (d-separated \
-in the graph with X's outgoing edges removed). Conditioning on Z allows us \
-to compute the unconfounded causal effect P(Y | do(X)).
+  Front-door (mediator set M — use even if M is a single node):
+      <answer>frontdoor: {M1, M2, ...}</answer>
 
-The **minimal adjustment set** is the smallest valid adjustment set — the \
-fewest nodes needed. If X and Y are already d-separated in the backdoor \
-graph (no open backdoor paths), the minimal set is empty: {}.
+  Not identifiable:
+      <answer>not_identifiable</answer>
 
-IMPORTANT RULES
----------------
-- Never include descendants of X in Z (this would open new biases).
-- A collider node on a path BLOCKS that path unless conditioned on; \
-  conditioning on a collider (or its descendant) OPENS the path — avoid this.
-- Your answer must be a subset of the non-descendant, non-X, non-Y nodes.
+Rules: do not write <answer> inside <reasoning>; use integer node IDs.
+"""
 
-RESPONSE FORMAT (strict)
-------------------------
-Your response MUST follow this structure exactly — no exceptions:
-
-1. Open a <reasoning> block in which you write your analysis and explanation.
-2. Close the </reasoning> block.
-3. Immediately after </reasoning>, write exactly one <answer> block.
-
-CRITICAL RULES for formatting:
-- You MUST close </reasoning> before writing <answer>.
-- Do NOT write <answer> tags anywhere inside the <reasoning> block.
-- There must be EXACTLY ONE <answer> tag in your entire response.
-- Use integer node IDs inside curly braces, comma-separated.
-- For an empty adjustment set use <answer>{}</answer>."""
-
-_ICL_EXAMPLE_1 = """
-Here is a worked example to illustrate the expected reasoning and format.
-
-Example (nodes 0–10; edges 0→1, 0→2, 0→6, 0→8, 0→9, 1→4, 1→8, 1→10, 2→3, 2→4, 2→7, 2→9, \
-2→10, 3→4, 3→7, 4→7, 4→9, 5→8, 5→10, 6→7, 6→8, 7→9, 8→9, 8→10; X=8, Y=9):
-
-<reasoning>
-Causal paths from X=8 to Y=9: 8→9 (direct).
-
-Descendants of X=8: {9, 10}. Non-descendants eligible for Z: {0, 1, 2, 3, 4, 5, 6, 7}.
-
-Backdoor graph: remove edges 8→9 and 8→10.
-
-Parents of X=8 — the only possible first steps of any backdoor path: {0, 1, 5, 6}.
-
-Verify each parent can reach Y=9 through an open path in the (undirected) backdoor graph:
-
-  Parent 0: 8←0→9 (direct edge 0→9; node 0 is a fork non-collider; open) — must condition on 0.
-
-  Parent 1: 8←1→4→9 (at node 1: fork non-collider; at 4: chain non-collider; open) — must condition on 1.
-
-  Parent 5: Consider all undirected paths starting 8–5.
-    Node 5 connects only to 8 (via 5→8) and 10 (via 5→10).
-    Every path from 5 toward Y must pass through node 10.
-    At node 10: arrows arrive from multiple parents (5→10, 1→10, 2→10). Node 10 is a COLLIDER
-    (all arrows point INTO it). A collider blocks the path by default unless we condition on it
-    or one of its descendants. Node 10 is a descendant of X=8 (8→10), so we cannot condition on it.
-    Therefore ALL backdoor paths through parent 5 are blocked by the un-activatable collider at 10.
-    Parent 5 is not a confounder and need not appear in Z.
-
-  Parent 6: 8←6→7→9 (at node 6: fork non-collider; at 7: chain non-collider; open) — must condition on 6.
-
-Active backdoor routes require blocking via parents 0, 1, and 6.
-
-Check that no proper subset of {0, 1, 6} suffices:
-  Drop 0: path 8←0→9 remains open.
-  Drop 1: path 8←1→4→9 remains open.
-  Drop 6: path 8←6→7→9 remains open.
-
-No colliders are inadvertently activated — each of {0, 1, 6} is a non-collider on every path it
-lies on, and none is a descendant of X=8.
-
-The minimal adjustment set is therefore {0, 1, 6}.
-</reasoning>
-<answer>{0, 1, 6}</answer>"""
-
-_ICL_EXAMPLE_2 = """
-Here is another worked example. The rendered DAG for this example is shown in the first image immediately following this system message.
-
-Example (nodes 0–8; edges 0→2, 0→4, 0→6, 0→7, 1→2, 1→3, 1→4, 1→7, 2→8, 3→4, 3→5, 4→5, \
-4→6, 4→8, 5→8; X=4, Y=8):
-
-<reasoning>
-Causal paths from X=4 to Y=8: 4→8 (direct) and 4→5→8.
-
-Descendants of X=4: {5, 6, 8}. Non-descendants eligible for Z: {0, 1, 2, 3, 7}.
-
-Backdoor graph: remove edges 4→5, 4→6, 4→8.
-
-Parents of X=4 — the only possible first steps of any backdoor path: {0, 1, 3}.
-
-Verify each parent independently reaches Y=8 in the backdoor graph:
-  Parent 0: 4←0→2→8  (at node 0: fork non-collider; at 2: chain non-collider; open)
-  Parent 1: 4←1→2→8  (at node 1: fork non-collider; at 2: chain non-collider; open)
-  Parent 3: 4←3→5→8  (at node 3: fork non-collider; at 5: chain non-collider; open)
-    Note: node 5 is a descendant of X=4, but since we do NOT condition on 5, the path remains open.
-    We must never include descendants of X in Z — but they may still appear on open backdoor paths.
-
-Check for collider shortcuts. Path 4←0→7←1→2→8:
-  At node 7: arrows from both 0 (0→7) and 1 (1→7) point INTO 7 — node 7 is a COLLIDER.
-  Node 7 is not in Z and not a descendant of X=4, so the collider is not activated; this path
-  is blocked. No adjustment for this path is needed.
-
-All three parents open independent backdoor routes and there is no shortcut: each path via parent 0,
-1, and 3 reaches Y through a different intermediate chain (node 2 for parents 0 and 1, node 5 for
-parent 3).
-
-Check that no proper subset of {0, 1, 3} suffices:
-  Drop 0: path 4←0→2→8 remains open.
-  Drop 1: path 4←1→2→8 remains open.
-  Drop 3: path 4←3→5→8 remains open.
-
-No colliders are inadvertently activated — each of {0, 1, 3} is a non-collider on every path it
-lies on, and none is a descendant of X=4.
-
-The minimal adjustment set is therefore {0, 1, 3}.
-</reasoning>
-<answer>{0, 1, 3}</answer>"""
-
-SYSTEM_PROMPT = _SYSTEM_PROMPT_BASE + _ICL_EXAMPLE_1 + _ICL_EXAMPLE_2
-
-# Pre-render the second ICL example's DAG at module load time so it can be
-# injected into the system message at rollout time without re-computing it.
-_ICL2_G = nx.DiGraph([
-    (0, 2), (0, 4), (0, 6), (0, 7),
-    (1, 2), (1, 3), (1, 4), (1, 7),
-    (2, 8),
-    (3, 4), (3, 5),
-    (4, 5), (4, 6), (4, 8),
-    (5, 8),
-])
-_ICL_EXAMPLE_2_B64 = _render_dag_b64(_ICL2_G, X=4, Y=8)
+SYSTEM_PROMPT = build_system_prompt(_F1_INTRO, _F1_RESPONSE_FORMAT)
 
 
-def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
+def format_problem(
+    edges: list,
+    nodes: list,
+    observed_nodes: list,
+    latent_nodes: list,
+    X: int,
+    Y: int,
+) -> str:
     """Render a DAG problem as a readable string for the model."""
     parents: dict[int, list[int]] = {n: [] for n in nodes}
     children: dict[int, list[int]] = {n: [] for n in nodes}
@@ -247,28 +152,35 @@ def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
 
     edge_str = ", ".join(f"{u}→{v}" for u, v in sorted(edges))
     node_str = ", ".join(str(n) for n in sorted(nodes))
+    obs_str = ", ".join(str(n) for n in sorted(observed_nodes))
+    lat_str = ", ".join(str(n) for n in sorted(latent_nodes)) if latent_nodes else "none"
 
     adj_lines = []
     for n in sorted(nodes):
         pa = sorted(parents[n])
         ch = sorted(children[n])
+        kind = "latent" if n in latent_nodes else "observed"
         adj_lines.append(
-            f"  Node {n}: parents=[{', '.join(map(str, pa))}]  "
+            f"  Node {n} ({kind}): parents=[{', '.join(map(str, pa))}], "
             f"children=[{', '.join(map(str, ch))}]"
         )
     adj_str = "\n".join(adj_lines)
 
     return (
-        f"Here is the textual representation of the DAG: \n"
-        f"Nodes: {node_str}\n"
-        f"Edges: {edge_str}\n\n"
+        f"DAG:\n"
+        f"Nodes:    {node_str}\n"
+        f"Observed: {obs_str}\n"
+        f"Latent:   {lat_str}\n"
+        f"Edges:    {edge_str}\n\n"
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
-        f"What is the minimal adjustment set Z that blocks all backdoor "
-        f"paths from {X} to {Y}?\n"
-        f"The rendered image of this DAG is also provided "
-        f"(blue node = treatment X, orange node = outcome Y).\n"
+        f"Determine whether the average treatment effect "
+        f"ATE = E[Y | do(X=1)] − E[Y | do(X=0)] is identifiable from the "
+        f"observed variables. If it is, state the identification method and "
+        f"the required variables. If it is not, respond with not_identifiable in the answer tags. RESPOND ACCORDING TO THE RESPONSE FORMAT SPECIFIED EARLIER.\n\n"
+        f"A visual rendering of this DAG is also provided "
+        f"(blue = X, orange = Y, gray = observed, purple = latent)."
     )
 
 
@@ -277,26 +189,50 @@ def format_problem(edges: list, nodes: list, X: int, Y: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def parse_answer(content: str) -> set[int] | None:
-    """Extract the adjustment set from the model's <answer> tag.
+def parse_answer(content: str) -> dict | None:
+    """Parse the model's <answer> tag into a structured result dict.
 
-    Returns a set of ints, or None if the format is invalid.
+    Valid forms and returned dicts:
+      <answer>{N1, N2, ...}</answer>         → {"type": "backdoor", "set": frozenset({N1, N2})}
+      <answer>{}</answer>                    → {"type": "backdoor", "set": frozenset()}
+      <answer>frontdoor: {M1, M2}</answer>   → {"type": "frontdoor", "mediators": frozenset({M1, M2})}
+      <answer>not_identifiable</answer>      → {"type": "not_identifiable"}
+
+    Returns None if no valid form is found or the content is malformed.
     """
     stripped = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL)
     matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", stripped, flags=re.DOTALL)
     if len(matches) != 1:
         return None
     inner = matches[0].strip()
-    m = re.match(r"^\{(.*)\}$", inner, re.DOTALL)
-    if not m:
-        return None
-    body = m.group(1).strip()
-    if body == "":
-        return set()
-    try:
-        return {int(x.strip()) for x in body.split(",")}
-    except ValueError:
-        return None
+
+    # not_identifiable — exact string match only
+    if inner == "not_identifiable":
+        return {"type": "not_identifiable"}
+
+    # frontdoor: {M1, M2, ...}
+    m = re.match(r"^frontdoor:\s*\{([^}]*)\}$", inner, re.IGNORECASE)
+    if m:
+        body = m.group(1).strip()
+        if body == "":
+            return None  # empty mediator set is invalid
+        try:
+            return {"type": "frontdoor", "mediators": frozenset(int(x.strip()) for x in body.split(","))}
+        except ValueError:
+            return None
+
+    # {N1, N2, ...} or {} — backdoor adjustment set
+    m = re.match(r"^\{([^}]*)\}$", inner)
+    if m:
+        body = m.group(1).strip()
+        if body == "":
+            return {"type": "backdoor", "set": frozenset()}
+        try:
+            return {"type": "backdoor", "set": frozenset(int(x.strip()) for x in body.split(","))}
+        except ValueError:
+            return None
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,64 +240,104 @@ def parse_answer(content: str) -> set[int] | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def adjustment_set_accuracy(completion, info) -> float:
-    """Reward: correctness of the predicted minimal adjustment set.
-
-    Scoring:
-      - Exact match → 1.0
-      - Partial match → Jaccard similarity (intersection / union)
-      - Unparseable answer → 0.0
-    """
-    content = completion[-1]["content"]
-    predicted = parse_answer(content)
-    if predicted is None:
-        return 0.0
-    gold = set(info["minimal_adjustment_set"])
-    if predicted == gold:
-        return 1.0
-    union = len(predicted | gold)
-    if union == 0:
-        return 1.0  # both empty
-    return len(predicted & gold) / union
-
-
 async def format_compliance(completion) -> float:
-    """Reward: whether the response follows the required XML format.
-
-    Returns 1.0 if <answer>{...}</answer> is correctly present, else 0.0.
-    """
+    """Reward: response contains exactly one parseable <answer> block (0.05 weight)."""
     content = completion[-1]["content"]
     return 1.0 if parse_answer(content) is not None else 0.0
 
 
-async def valid_adjustment_set(completion, info) -> float:
-    """Reward: whether the predicted set is a valid (not necessarily minimal) adjustment set.
+async def status_check(completion, info) -> float:
+    """Reward: correct identification method declared
 
-    A set Z is valid if:
-      1. No node in Z is a descendant of X (post-treatment bias check).
-      2. Z d-separates X from Y in the backdoor graph (G with X's outgoing edges removed).
+    For backdoor problems:   predicted type must be 'backdoor' 
+    For frontdoor problems:  predicted type must be 'frontdoor'.
+    For not_identifiable:    predicted type must be 'not_identifiable'.
 
-    Returns 1.0 if valid, 0.0 otherwise (including unparseable answers).
+    Returns 1.0 on full credit, 0.0 otherwise.
     """
     content = completion[-1]["content"]
     predicted = parse_answer(content)
     if predicted is None:
         return 0.0
 
-    X = info["X"]
-    Y = info["Y"]
+    true_status = info["identifiability_status"]
+    # Map ground-truth status → expected predicted type
+    expected_type = {
+        "identifiable":          "backdoor",
+        "empty":                 "backdoor",
+        "identifiable_frontdoor": "frontdoor",
+        "not_identifiable":      "not_identifiable",
+    }.get(true_status)
 
+    if predicted["type"] != expected_type:
+        return 0.0
+
+    return 1.0
+
+
+async def answer_correctness(completion, info) -> float:
+    """Reward: exact correctness of the answer (0.80 weight).
+
+    Scoring per identifiability status:
+      identifiable (backdoor, non-empty):
+        1.0  — predicted set matches any element of minimal_adjustment_sets
+        0.25 — predicted set is valid but larger than minimum size
+        0.0  — invalid set, wrong type, or unparseable
+      empty (backdoor, empty set):
+        1.0  — predicted set is {}
+        0.0  — anything else
+      identifiable_frontdoor:
+        1.0  — predicted mediator matches mediator_node
+        0.0  — wrong mediator or wrong type
+      not_identifiable:
+        1.0  — predicted type is 'not_identifiable'
+        0.0  — anything else
+    """
+    content = completion[-1]["content"]
+    predicted = parse_answer(content)
+    if predicted is None:
+        return 0.0
+
+    true_status = info["identifiability_status"]
+
+    if true_status == "not_identifiable":
+        return 1.0 if predicted["type"] == "not_identifiable" else 0.0
+
+    if true_status == "identifiable_frontdoor":
+        if predicted["type"] != "frontdoor":
+            return 0.0
+        gold_mediators = frozenset({info["mediator_node"]})
+        return 1.0 if predicted["mediators"] == gold_mediators else 0.0
+
+    if true_status == "empty":
+        if predicted["type"] != "backdoor":
+            return 0.0
+        return 1.0 if predicted["set"] == frozenset() else 0.0
+
+    # true_status == "identifiable" (non-empty backdoor)
+    if predicted["type"] != "backdoor":
+        return 0.0
+
+    predicted_set = predicted["set"]
+    gold_sets = [frozenset(s) for s in info["minimal_adjustment_sets"]]
+
+    # Exact match against any minimum-size set
+    if predicted_set in gold_sets:
+        return 1.0
+
+    # Valid but non-minimal: check d-separation and no descendants
+    X, Y = info["X"], info["Y"]
     G = nx.DiGraph()
     G.add_nodes_from(info["nodes"])
     G.add_edges_from(info["edges"])
-
-    if predicted & nx.descendants(G, X):
+    if predicted_set & nx.descendants(G, X):
         return 0.0
-
     G_bd = G.copy()
     G_bd.remove_edges_from(list(G.out_edges(X)))
+    if is_d_separator(G_bd, {X}, {Y}, predicted_set):
+        return 0.5  # valid but non-minimal
 
-    return 1.0 if is_d_separator(G_bd, {X}, {Y}, predicted) else 0.0
+    return 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,20 +360,12 @@ class Flavor1Env(vf.SingleTurnEnv):
         G.add_nodes_from(info["nodes"])
         G.add_edges_from(info["edges"])
 
-        b64 = _render_dag_b64(G, info["X"], info["Y"])
+        b64 = _render_dag_b64(
+            G, info["X"], info["Y"],
+            latent_nodes=set(info.get("latent_nodes", [])),
+        )
 
         prompt = list(state["prompt"])
-
-        # Upgrade system message to multimodal: append the ICL example 2 DAG image.
-        sys_idx = next((i for i, m in enumerate(prompt) if m["role"] == "system"), None)
-        if sys_idx is not None and isinstance(prompt[sys_idx]["content"], str):
-            prompt[sys_idx] = {
-                "role": "system",
-                "content": [
-                    {"type": "text", "text": prompt[sys_idx]["content"]},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_ICL_EXAMPLE_2_B64}"}},
-                ],
-            }
 
         # Upgrade last user message to [text, image].
         last_user_idx = max(i for i, m in enumerate(prompt) if m["role"] == "user")
@@ -461,8 +429,8 @@ def load_flavor1(
             eval_dataset = build_dataset(eval_problems, format_problem)
 
     rubric = vf.Rubric(
-        funcs=[adjustment_set_accuracy, valid_adjustment_set, format_compliance],
-        weights=[0.9, 0.0, 0.1],
+        funcs=[format_compliance, status_check, answer_correctness],
+        weights=[0.1, 0.1, 0.80],
     )
 
     return Flavor1Env(
@@ -474,7 +442,6 @@ def load_flavor1(
 
 
 if __name__ == "__main__":
-    import base64 as _b64
     from collections import Counter
 
     print(f"Generating stratified problems (seed={_SEED}, nodes={_MIN_NODES}–{_MAX_NODES})…")

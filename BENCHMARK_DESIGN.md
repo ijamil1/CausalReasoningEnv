@@ -22,34 +22,66 @@ The existing `CausalReasoningEnv_1` benchmarks only one causal task — minimal 
 - **Collider chain trap.** A node C may be a collider on path P1 (conditioning on C blocks P1) but a non-collider on path P2 (conditioning on C opens P2). These cases directly test collider logic — the model must avoid C or find an alternative set that handles both paths simultaneously.
 - **No-set and empty-set cases.** ~20% of problems should require "no valid adjustment set exists" or "no adjustment needed" as the correct answer. Models are biased toward producing a non-empty set; these cases test whether the model correctly diagnoses the graph rather than finding something to adjust for.
 
-**Problem Types (stratified sampling at generation time):**
+**Problem Types (five stratified buckets — implemented in `flavor1_gen.py`):**
 ```
-(a) Standard: unique or multiple minimal adjustment sets exist
-(b) Multiple minimal sets: enumerate all; model gets credit for any valid minimal set
-(c) Empty adjustment set: X and Y are not confounded — Z = {} is the correct answer
-(d) No valid adjustment set (backdoor not identifiable): at least one backdoor path
-    cannot be blocked without conditioning on a collider, which opens another path.
-    Model must state ATE is not identifiable by backdoor and explain the blocking failure.
-(e) Collider chain: node C is collider on P1 and non-collider on P2. Model must
-    avoid C and find an alternative blocking set, or correctly state no set exists.
+identifiable_standard (~42%):
+  Non-empty minimal adjustment set; all observed parents of X are required
+  (|min_set| ≥ |observed_parents(X)|).
+
+identifiable_ancestor (~14%):
+  Non-empty set; |min_set| < |observed_parents(X)|; redundancy because a
+  dropped observed parent has an ancestor already in min_set.
+
+identifiable_collider (~14%):
+  Non-empty set; |min_set| < |observed_parents(X)|; redundancy via a
+  collider structure on the backdoor path through that parent.
+  NOTE: type (e) collider-chain problems from the original design are
+  subsumed here — they are a subset of identifiable_collider.
+
+empty (~15%):
+  Empty minimal adjustment set.  X and Y are already d-separated in the
+  backdoor graph (all paths blocked by unconditioned colliders).  Requires
+  ≥1 undirected path in G_bd (result is structural, not trivial).
+
+not_identifiable (~15%):
+  No valid observed adjustment set exists.  A synthetic latent node L is
+  added with direct edges L→X and L→Y.  X→Y is a direct edge and the ONLY
+  causal path (no X→M→Y mediator — ruling out the front-door criterion).
+  Model must state ATE is not identifiable and explain the blocking failure.
 ```
 
-**Data Generation:**
+**Data Generation (current implementation in `flavor1_gen.py`):**
 ```
-- Enumerate all minimal d-separators at generation time using networkx + BFS
-- Store in info dict: all_minimal_adjustment_sets, identifiability_status
-  identifiability_status ∈ {"identifiable", "not_identifiable", "no_adjustment_needed"}
-- Stratify problem types: ~50% type (a)/(b), ~15% type (c), ~20% type (d), ~15% type (e)
-- For type (d)/(e): verify programmatically that no valid adjustment set exists
+Observed / latent node assignment:
+- Every problem includes observed_nodes and latent_nodes fields.
+- X and Y are always observed.
+- For identifiable/empty types: non-X, non-Y nodes are independently marked
+  latent (Bernoulli p=0.3) BEFORE the minimal adjustment set is computed.
+  The d-separator is then restricted to observed_nodes − {X, Y}.
+  If no observed adjustment set exists, the sample is discarded.
+- For not_identifiable: a fresh latent node L is appended with L→X and L→Y.
+
+Sampling filters (all types):
+- Directed X→Y path required.
+- Y is a leaf node (no outgoing edges in G).
+- identifiable: ≥4 undirected backdoor paths in G_bd, ≥1 of length ≥5.
+- empty: ≥1 undirected path in G_bd.
+- not_identifiable: X→Y must be the only causal path (no mediator);
+  find_minimal_d_separator(G_bd, X, Y, restricted=observed−{X,Y}) = None.
+
+Uniqueness: (frozenset(edges), X, Y) signatures deduplicated across split.
+Train/eval split: stratified per bucket (~71%/29% for n_train=250, n_eval=100).
 ```
 
-**Reward:**
+**Reward (current implementation in `flavor1.py`):**
 ```
-- identifiability_status correct: 0.20 (prerequisite; if wrong, cap total at 0.20)
-- For identifiable: exact match against any element of all_minimal_adjustment_sets = 0.80
-  Valid but non-minimal = 0.25. Jaccard partial credit with minimality penalty.
-- For not_identifiable: correct status declaration + explanation of blocking failure = 0.80
-- For no_adjustment_needed: correct status + Z={} = 1.0
+- format_reward (0.05): exactly one parseable <answer> block
+- valid_adjustment_set (0.15): predicted set is a valid (not necessarily
+  minimal) adjustment set
+- correct_adjustment_set (0.80): predicted set exactly matches the minimal
+  adjustment set
+NOTE: reward functions need updating to handle the three identifiability
+statuses and the new not_identifiable / empty answer formats.
 ```
 
 **Benchmark Prompt Sketch:**
