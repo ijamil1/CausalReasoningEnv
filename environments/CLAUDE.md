@@ -16,7 +16,7 @@ Weight index order in `load_environment(weights=[w0, w1, w2, w3])`:
 
 | Index | Flavor | Status | Task |
 |-------|--------|--------|------|
-| 0 | **Flavor 1 — Adjustment Set** | ✅ Implemented | Given DAG + X, Y: find minimal valid Z blocking all backdoor paths. |
+| 0 | **Flavor 1 — Causal Identification** | ✅ Implemented | Given DAG + X, Y with observed/latent nodes: determine identifiability status (backdoor, frontdoor, empty, not-identifiable) and return the minimal adjustment set, frontdoor mediator, or flag non-identifiability. |
 | 1 | **Flavor 3 — Analytical ATE** | 🚧 Stub | Given DAG + fully specified SCM: compute exact E[Y\|do(X=x)] analytically. |
 | 2 | **Flavor 2 — ATE from Data** | 🚧 Stub | Given DAG + observational CSV: estimate ATE/CATE by stratified counting (tool use). |
 | 3 | **Flavor 4 — Estimate SCM** | 🚧 Stub | Given DAG + data: estimate structural equations by regressing each node on its causal parents. |
@@ -32,10 +32,15 @@ When implementing Flavors 2–4, reuse these from [flavor1.py](CausalReasoningEn
 
 ### Reward Rubric Conventions (all flavors)
 
-Rubrics use 4 layers with these canonical weights:
-- **Layer 1 — Format compliance:** `weight=0.05` (parseable `<answer>...</answer>`)
+**Flavor 1 (implemented)** uses 3 layers:
+- **Layer 1 — Format compliance:** `weight=0.10` (`format_compliance`) — parseable `<answer>` block
+- **Layer 2 — Status check:** `weight=0.10` (`status_check`) — correct identification method declared (backdoor / frontdoor / not_identifiable)
+- **Layer 3 — Answer correctness:** `weight=0.80` (`answer_correctness`) — exact match against any minimal set; 0.5 for valid but non-minimal; 0.0 for wrong method or invalid
+
+**Flavors 2–4 (planned)** will use 4 layers:
+- **Layer 1 — Format compliance:** `weight=0.05`
 - **Layer 2 — Validity / process:** `weight=0.15` (valid adjustment set, correct parent selection, etc.)
-- **Layer 3 — Answer correctness:** `weight=0.80` (flavor-specific; see BENCHMARK_DESIGN.md for per-flavor scoring)
+- **Layer 3 — Answer correctness:** `weight=0.80` (flavor-specific; see BENCHMARK_DESIGN.md)
 - **Layer 4 — Monitoring metrics:** `weight=0` (tool usage, num_tool_calls, intermediate correctness)
 
 ### Tools for CausalReasoningEnv (Flavors 2–4)
@@ -49,8 +54,8 @@ Five tools are specified in BENCHMARK_DESIGN.md; implement in `CausalReasoningEn
 
 ### Data Generation Notes
 
-- **DAG structure:** Random DAGs with stratification (standard / collider / ancestor difficulty)
-- **Flavor 1:** Enumerate *all* minimal adjustment sets at generation time; store as `all_minimal_adjustment_sets: list[list[int]]` in `info`
+- **DAG structure:** Random DAGs with stratification across 6 problem types
+- **Flavor 1:** 6 stratified problem types (identifiable_standard ~20%, identifiable_ancestor ~15%, identifiable_collider ~20%, identifiable_frontdoor ~10%, empty ~15%, not_identifiable ~20%). All minimal adjustment sets enumerated at generation time; stored as `minimal_adjustment_sets: list[list[int]]` in `info`. Frontdoor mediator stored as `mediator_node`. Datasets hosted on HuggingFace: `irfanjamil/causal-reasoning-flavor1` (250 train / 100 test splits).
 - **Flavors 2/4:** Nonlinear SCM, discrete variables, N=2000 rows; true ATE via exact enumeration
 - **Flavor 3:** 75% linear SCM, 25% nonlinear (tanh/quadratic); true ATE via 1M-sample simulation
 

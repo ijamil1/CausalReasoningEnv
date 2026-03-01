@@ -8,9 +8,9 @@ The existing `CausalReasoningEnv_1` benchmarks only one causal task — minimal 
 
 ## Part I: Benchmark Analysis — Four Flavors
 
-### Flavor 1 — Adjustment Set Identification (ALREADY BUILT)
+### Flavor 1 — Causal Identification ✅ Implemented
 
-**Task:** Given a DAG with treatment X and outcome Y, determine: (a) Is ATE identifiable by backdoor adjustment from the observed variables? (b) If yes, give the minimal valid adjustment set Z. If no, explain which structural condition prevents it.
+**Task:** Given a DAG with treatment X, outcome Y, and a mix of observed/latent nodes: (a) determine the identifiability status of ATE (backdoor-identifiable, frontdoor-identifiable, empty, or not-identifiable), and (b) produce the appropriate answer — minimal backdoor adjustment set, frontdoor mediator, or non-identifiability declaration.
 
 **What it tests:** d-separation, backdoor criterion, collider logic, non-descendant constraint, and crucially — the ability to diagnose *when* no valid adjustment set exists.
 
@@ -22,32 +22,38 @@ The existing `CausalReasoningEnv_1` benchmarks only one causal task — minimal 
 - **Collider chain trap.** A node C may be a collider on path P1 (conditioning on C blocks P1) but a non-collider on path P2 (conditioning on C opens P2). These cases directly test collider logic — the model must avoid C or find an alternative set that handles both paths simultaneously.
 - **No-set and empty-set cases.** ~20% of problems should require "no valid adjustment set exists" or "no adjustment needed" as the correct answer. Models are biased toward producing a non-empty set; these cases test whether the model correctly diagnoses the graph rather than finding something to adjust for.
 
-**Problem Types (five stratified buckets — implemented in `flavor1_gen.py`):**
+**Problem Types (six stratified buckets — implemented in `flavor1_gen.py`):**
 ```
-identifiable_standard (~42%):
+identifiable_standard (~20%):
   Non-empty minimal adjustment set; all observed parents of X are required
   (|min_set| ≥ |observed_parents(X)|).
 
-identifiable_ancestor (~14%):
+identifiable_ancestor (~15%):
   Non-empty set; |min_set| < |observed_parents(X)|; redundancy because a
   dropped observed parent has an ancestor already in min_set.
 
-identifiable_collider (~14%):
+identifiable_collider (~20%):
   Non-empty set; |min_set| < |observed_parents(X)|; redundancy via a
   collider structure on the backdoor path through that parent.
-  NOTE: type (e) collider-chain problems from the original design are
-  subsumed here — they are a subset of identifiable_collider.
+  NOTE: type (e) collider-chain problems are subsumed here — they are a
+  subset of identifiable_collider.
+
+identifiable_frontdoor (~10%):
+  Latent confounder U→X and U→Y blocks all valid backdoor adjustment sets.
+  A mediator M exists (X→M→Y) with no unblocked backdoor paths from X to M
+  and all backdoor paths from M to Y blocked by X. Frontdoor criterion applies.
+  Model must identify M and declare "frontdoor" as the identification strategy.
 
 empty (~15%):
   Empty minimal adjustment set.  X and Y are already d-separated in the
   backdoor graph (all paths blocked by unconditioned colliders).  Requires
   ≥1 undirected path in G_bd (result is structural, not trivial).
 
-not_identifiable (~15%):
+not_identifiable (~20%):
   No valid observed adjustment set exists.  A synthetic latent node L is
   added with direct edges L→X and L→Y.  X→Y is a direct edge and the ONLY
   causal path (no X→M→Y mediator — ruling out the front-door criterion).
-  Model must state ATE is not identifiable and explain the blocking failure.
+  Model must declare ATE is not identifiable.
 ```
 
 **Data Generation (current implementation in `flavor1_gen.py`):**
@@ -73,15 +79,18 @@ Uniqueness: (frozenset(edges), X, Y) signatures deduplicated across split.
 Train/eval split: stratified per bucket (~71%/29% for n_train=250, n_eval=100).
 ```
 
-**Reward (current implementation in `flavor1.py`):**
+**Reward (implemented in `flavor1.py`):**
 ```
-- format_reward (0.05): exactly one parseable <answer> block
-- valid_adjustment_set (0.15): predicted set is a valid (not necessarily
-  minimal) adjustment set
-- correct_adjustment_set (0.80): predicted set exactly matches the minimal
-  adjustment set
-NOTE: reward functions need updating to handle the three identifiability
-statuses and the new not_identifiable / empty answer formats.
+- format_compliance (0.10): exactly one parseable <answer> block
+- status_check (0.10): correct identification method declared
+    ("backdoor" for identifiable/empty, "frontdoor", or "not_identifiable")
+- answer_correctness (0.80):
+    - backdoor: 1.0 if predicted set ∈ minimal_adjustment_sets;
+                0.5 if valid d-separator but non-minimal;
+                0.0 otherwise
+    - frontdoor: 1.0 if predicted mediator matches mediator_node
+    - empty: 1.0 if predicted set is {}
+    - not_identifiable: 1.0 if type declared as not_identifiable
 ```
 
 **Benchmark Prompt Sketch:**
@@ -626,7 +635,12 @@ environments/
 - ✅ [2026-02-27] Port `Flavor1Env` class + `load_flavor1()` → `flavor1.py`
 - ✅ [2026-02-27] Port `_render_dag_b64`, `format_problem`, `valid_adjustment_set`, `parse_answer` → inline in `flavor1.py`
 - ✅ [2026-02-27] Delete `environments/CausalReasoningEnv_1/`
-- [ ] Verify `flavor1.py` produces equivalent reward behavior to the original (run `prime eval` spot-check)
+- ✅ [2026-02-28] Refactor flavor1 prompts; add shared `prompts.py` module (`CAUSAL_KNOWLEDGE`, `build_system_prompt`)
+- ✅ [2026-02-28] Implement 6-bucket stratified generation in `flavor1_gen.py` (including frontdoor and not_identifiable types)
+- ✅ [2026-02-28] Implement reward functions: `format_compliance`, `status_check`, `answer_correctness` covering all identifiability cases
+- ✅ [2026-03-01] Generate train (250) + eval (100) datasets; upload to HuggingFace: `irfanjamil/causal-reasoning-flavor1`
+- ✅ [2026-03-01] `load_flavor1()` simplified — no parameters; loads directly from HuggingFace via `load_dataset()`
+- [ ] Verify `flavor1.py` produces correct reward behavior (run `prime eval` spot-check)
 
 ### New files to create
 - ✅ [2026-02-27] `environments/CausalReasoningEnv/CausalReasoningEnv.py`
@@ -640,7 +654,7 @@ environments/
 - Note: configs placed in `configs/lab/` (not `configs/vf-rl/`) — update path references if needed
 
 ### New dependencies needed
-- [ ] `scipy`, `pandas`, `statsmodels` — data generation and estimation (needed for Flavors 2–4)
+- ✅ `scipy`, `pandas`, `statsmodels` — already added to `pyproject.toml`
 - [ ] `sympy` — optional symbolic SCM manipulation (Flavor 3 linear case)
 
 ### Verification plan

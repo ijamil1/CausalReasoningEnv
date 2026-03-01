@@ -24,33 +24,36 @@ prime env install CausalReasoningEnv -p ./environments
 
 ## What's Implemented
 
-### Flavor 1 — Adjustment Set Identification ✅
+### Flavor 1 — Causal Identification ✅
 
-**Task:** Given a DAG with treatment node X and outcome node Y, identify the minimal valid adjustment set Z — the smallest set of non-descendants of X whose conditioning blocks all backdoor paths from X to Y (d-separation in the backdoor graph).
+**Task:** Given a DAG with treatment node X, outcome node Y, and a mix of observed/latent nodes: (a) determine the identifiability status of ATE, and (b) produce the appropriate answer — minimal backdoor adjustment set, frontdoor mediator, or a non-identifiability declaration.
 
-**Prompt:** The model receives both a text description of the DAG (edge list, X, Y) and a rendered PNG image. Two in-context examples with full chain-of-thought reasoning are included in the system prompt.
+**Prompt:** The model receives a text description of the DAG (nodes classified as observed/latent, edge list, X, Y) and a rendered PNG image (blue=X, orange=Y, gray=observed, light purple=latent). The system prompt provides comprehensive causal inference knowledge (d-separation, backdoor/frontdoor criteria, identifiability conditions) without worked examples.
 
-**Expected output:**
+**Expected output formats:**
 ```xml
-<reasoning>
-[step-by-step backdoor path analysis]
-</reasoning>
-<answer>{2, 5}</answer>
+<reasoning>[step-by-step causal analysis]</reasoning>
+<answer>{2, 5}</answer>                  <!-- backdoor: adjustment set -->
+<answer>frontdoor: {3}</answer>          <!-- frontdoor: mediator node -->
+<answer>not_identifiable</answer>        <!-- no valid identification strategy -->
 ```
 
-**Problem types (stratified):**
-- `standard` — all parents of X are needed in the adjustment set
-- `ancestor` — parent redundancy via ancestor absorption (smaller set suffices)
-- `collider` — parent redundancy via collider structure (some parents blocked by default)
+**Problem types (6 stratified buckets):**
+- `identifiable_standard` (~20%) — non-empty minimal adjustment set; all observed parents of X are required
+- `identifiable_ancestor` (~15%) — non-empty set; redundancy because a dropped parent has an ancestor already in the set
+- `identifiable_collider` (~20%) — non-empty set; redundancy via a collider structure on the backdoor path
+- `identifiable_frontdoor` (~10%) — latent confounder blocks all backdoor adjustment; frontdoor criterion applies via a mediator M
+- `empty` (~15%) — empty adjustment set; X and Y already d-separated in the backdoor graph
+- `not_identifiable` (~20%) — latent L→X and L→Y with X→Y direct edge; neither backdoor nor frontdoor criterion applies
 
-**Data generation:** Random DAGs (Erdős–Rényi, forward edges only), 6–12 nodes. Each accepted problem has: Y is a descendant of X, Y is a leaf, at least 4 backdoor paths exist with at least one of length ≥ 5 nodes, and a valid minimal d-separator exists. The minimal adjustment set is computed using `networkx.algorithms.d_separation.find_minimal_d_separator`.
+**Data generation:** Random DAGs (Erdős–Rényi, forward edges only), 8–12 nodes. Non-X/Y nodes randomly marked latent (p=0.3). All minimal adjustment sets enumerated and stored as `minimal_adjustment_sets` in `info`. Datasets hosted on HuggingFace: `irfanjamil/causal-reasoning-flavor1` (250 train / 100 test). Loaded via `load_dataset()` in `load_flavor1()`.
 
 **Reward rubric:**
-- `format_reward` (weight 0.05) — response contains exactly one parseable `<answer>` block
-- `valid_adjustment_set` (weight 0.15) — predicted set is a valid (not necessarily minimal) adjustment set
-- `correct_adjustment_set` (weight 0.80) — predicted set exactly matches the minimal adjustment set
+- `format_compliance` (weight 0.10) — response contains exactly one parseable `<answer>` block
+- `status_check` (weight 0.10) — correct identification method declared (backdoor / frontdoor / not_identifiable)
+- `answer_correctness` (weight 0.80) — exact match against any element of `minimal_adjustment_sets` = 1.0; valid but non-minimal = 0.5; wrong type or invalid = 0.0
 
-**Environment type:** `vf.SingleTurnEnv` subclass (`Flavor1Env`).
+**Environment type:** `vf.SingleTurnEnv` subclass (`Flavor1Env`). Uses `setup_state()` to inject a base64-encoded PNG of the DAG into the user message as a multimodal image.
 
 ---
 
@@ -123,11 +126,16 @@ CausalReasoningEnv/
   flavor2.py                  # Flavor2Env stub
   flavor3.py                  # Flavor3Env stub
   flavor4.py                  # Flavor4Env stub
+  prompts.py                  # shared prompt components (CAUSAL_KNOWLEDGE, build_system_prompt)
   data_generation/
     flavor1_gen.py            # DAG generation, problem sampling, dataset builder
+    generate_datasets_flavor1.py  # standalone script: regenerate + save datasets to disk
+    profile_datasets_flavor1.py   # dataset profiling and distribution visualization
+    upload_flavor1_datasets.py    # one-off: push local Arrow files to HuggingFace Hub
     flavor2_gen.py            # stub
     flavor3_gen.py            # stub
     flavor4_gen.py            # stub
+  datasets/flavor1/           # local Arrow copies (train/ + eval/) — source of truth for HF upload
   pyproject.toml
   README.md                   # this file
 ```
