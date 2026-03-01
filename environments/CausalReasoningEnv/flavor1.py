@@ -20,7 +20,6 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import verifiers as vf
-from datasets import Dataset
 from networkx.algorithms.d_separation import is_d_separator
 
 from data_generation.flavor1_gen import (
@@ -398,35 +397,19 @@ _TRAIN_DATASET_PATH = _DATASET_DIR / "train"
 _EVAL_DATASET_PATH = _DATASET_DIR / "eval"
 
 
-def load_flavor1(
-    train_dataset: Dataset | None = None,
-    eval_dataset: Dataset | None = None,
-) -> Flavor1Env:
+_HF_DATASET_ID = "irfanjamil/causal-reasoning-flavor1"
+
+
+def load_flavor1() -> Flavor1Env:
     """Load the Flavor 1 environment (adjustment set identification).
 
-    If datasets are not passed, attempts to auto-load pre-built datasets from
-    disk. If no datasets exist on disk, generates them from scratch (slow; run
-    this module as __main__ to pre-build and save them).
+    Datasets are loaded from HuggingFace Hub: irfanjamil/causal-reasoning-flavor1.
     """
-    from datasets import load_from_disk
+    from datasets import load_dataset
 
-    if train_dataset is None and _TRAIN_DATASET_PATH.exists():
-        train_dataset = load_from_disk(str(_TRAIN_DATASET_PATH))
-    if eval_dataset is None and _EVAL_DATASET_PATH.exists():
-        eval_dataset = load_from_disk(str(_EVAL_DATASET_PATH))
-
-    if train_dataset is None or eval_dataset is None:
-        train_problems, eval_problems = generate_stratified_dag_problems(
-            n_train=_NUM_TRAIN,
-            n_eval=_NUM_EVAL,
-            min_nodes=_MIN_NODES,
-            max_nodes=_MAX_NODES,
-            seed=_SEED,
-        )
-        if train_dataset is None:
-            train_dataset = build_dataset(train_problems, format_problem)
-        if eval_dataset is None:
-            eval_dataset = build_dataset(eval_problems, format_problem)
+    dataset = load_dataset(_HF_DATASET_ID)
+    train_dataset = dataset["train"]
+    eval_dataset = dataset["test"]
 
     rubric = vf.Rubric(
         funcs=[format_compliance, status_check, answer_correctness],
