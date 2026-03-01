@@ -4,6 +4,7 @@ Each flavor's SYSTEM_PROMPT is composed via build_system_prompt():
 
     SYSTEM_PROMPT = build_system_prompt(
         flavor_intro=<one or two sentences describing what inputs the model receives>,
+        task=<one sentence describing what the model must do>,
         response_format=<RESPONSE FORMAT section specific to this flavor>,
     )
 
@@ -108,13 +109,16 @@ In other words, there exists no subset of the observed variables which allows is
 # Composer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_system_prompt(flavor_intro: str, response_format: str) -> str:
+def build_system_prompt(flavor_intro: str, response_format: str, task: str = "") -> str:
     """Compose a complete system prompt from the shared knowledge block.
 
     Args:
         flavor_intro:    One or two sentences describing what inputs the model
                          receives for this flavor (e.g. "You will be given a
                          DAG and observational data...").
+        task:            One sentence describing what the model must do
+                         (e.g. "Determine whether the ATE is identifiable...").
         response_format: The RESPONSE FORMAT section specific to this flavor.
     """
-    return f"{_HEADER}\n\n{flavor_intro}\n\n{CAUSAL_KNOWLEDGE}\n\n{response_format}"
+    task_block = f"\nTASK\n────\n{task}\n" if task else ""
+    return f"{_HEADER}\n\n{flavor_intro}\n{task_block}\n{CAUSAL_KNOWLEDGE}\n\n{response_format}"

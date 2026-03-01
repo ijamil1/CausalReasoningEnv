@@ -109,25 +109,31 @@ causal model, along with a visual rendering of the same graph. Nodes are \
 variables. Nodes may be observed or latent/unobserved. A directed edge A→B means A is a direct cause of B.\
 """
 
+_F1_TASK = """\
+Given the DAG, determine whether the average treatment effect ATE = E[Y | do(X=1)] − E[Y | do(X=0)] \
+is identifiable, and if so, identify the method \
+(backdoor adjustment set or front-door mediator set) and the required variable set.\
+"""
+
 _F1_RESPONSE_FORMAT = """\
 RESPONSE FORMAT
 ────────────────
 You must follow the following format exactly. Write all reasoning inside a <reasoning> block. After </reasoning>, write \
 exactly one <answer> block using one of these three forms:
 
-  Backdoor (adjustment set, including empty set):
+  If identifiable via a backdoor adjustment set (including empty set):
       <answer>{N1, N2, ...}</answer>   or   <answer>{}</answer>
 
-  Front-door (mediator set M — use even if M is a single node):
+  If identifiable via the front-door criterion (for mediator M, use set notation even if M is a single node):
       <answer>frontdoor: {M1, M2, ...}</answer>
 
-  Not identifiable:
+  If not identifiable:
       <answer>not_identifiable</answer>
 
 Rules: do not write <answer> inside <reasoning>; use integer node IDs.
 """
 
-SYSTEM_PROMPT = build_system_prompt(_F1_INTRO, _F1_RESPONSE_FORMAT)
+SYSTEM_PROMPT = build_system_prompt(_F1_INTRO, _F1_RESPONSE_FORMAT, task=_F1_TASK)
 
 
 def format_problem(
@@ -162,7 +168,8 @@ def format_problem(
     adj_str = "\n".join(adj_lines)
 
     return (
-        f"DAG:\n"
+        f"DAG INFORMATION\n"
+        f"───────────────\n"
         f"Nodes:    {node_str}\n"
         f"Observed: {obs_str}\n"
         f"Latent:   {lat_str}\n"
@@ -170,12 +177,14 @@ def format_problem(
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
-        f"Determine whether the average treatment effect "
-        f"ATE = E[Y | do(X=1)] − E[Y | do(X=0)] is identifiable from the "
-        f"observed variables. If it is, state the identification method and "
-        f"the required variables. If it is not, respond with not_identifiable in the answer tags. RESPOND ACCORDING TO THE RESPONSE FORMAT SPECIFIED EARLIER.\n\n"
         f"A visual rendering of this DAG is also provided "
-        f"(blue = X, orange = Y, gray = observed, purple = latent)."
+        f"(blue = X, orange = Y, gray = observed, purple = latent).\n\n"
+        f"QUESTION\n"
+        f"────────\n"
+        f"Is ATE = E[Y | do(X=1)] − E[Y | do(X=0)] identifiable from the causal model implied by this DAG? "
+        f"If yes, state the identification method and the required variable set. "
+        f"If not, respond with not_identifiable. "
+        f"Respond according to the response format specified in the system prompt."
     )
 
 
