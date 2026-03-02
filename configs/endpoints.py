@@ -109,10 +109,10 @@ ENDPOINTS = {
         "url": "https://api.together.xyz/v1",
         "key": "TOGETHER_API_KEY",
     },
-    "Qwen/Qwen3-VL-8B-Instruct": {
-        "model": "Qwen/Qwen3-VL-8B-Instruct",
-        "url": "https://api.together.xyz/v1",
-        "key": "TOGETHER_API_KEY",
+    "qwen/qwen3-vl-8b-instruct": {
+        "model": "qwen/qwen3-vl-8b-instruct",
+        "url": "https://api.pinference.ai/api/v1",
+        "key": "PRIME_API_KEY",
     },
     # moonshot
     "kimi-k2": {

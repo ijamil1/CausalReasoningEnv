@@ -5,97 +5,18 @@ outcome node Y, the model must identify the minimal adjustment set Z:
 the smallest set of non-descendants of X whose conditioning blocks all
 backdoor paths between X and Y (via d-separation in the backdoor graph).
 
-Environment type: SingleTurnEnv subclass. The DAG is rendered as a PNG
-at rollout start and injected into the prompt alongside the text description.
+Environment type: vf.SingleTurnEnv. The DAG is presented to the model
+as a textual description only (nodes, edges, adjacency, observed/latent status).
 """
 
-import base64
-import io
 import pathlib
 import re
 
-import matplotlib
-matplotlib.use("Agg")  # non-interactive backend; must be set before pyplot import
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import networkx as nx
 import verifiers as vf
 from networkx.algorithms.d_separation import is_d_separator
 
 from prompts import build_system_prompt
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DAG rendering
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _dag_layout(G: nx.DiGraph) -> dict:
-    """Layer-by-layer topological layout (sources at top, sinks at bottom)."""
-    pos = {}
-    for depth, layer in enumerate(nx.topological_generations(G)):
-        layer = sorted(layer)
-        for i, node in enumerate(layer):
-            pos[node] = ((i - (len(layer) - 1) / 2.0), -float(depth))
-    return pos
-
-
-def _render_dag_b64(
-    G: nx.DiGraph,
-    X: int,
-    Y: int,
-    latent_nodes: set[int] | None = None,
-    figsize=(8, 6),
-    dpi=100,
-) -> str:
-    """Render a DAG as a base64-encoded PNG string.
-
-    X (treatment) is blue, Y (outcome) is orange, latent nodes are light
-    purple with an italic "(L)" label suffix, observed nodes are gray.
-    Layout is topological so causal flow reads top-to-bottom.
-    """
-    latent_nodes = set(latent_nodes) if latent_nodes else set()
-    pos = _dag_layout(G)
-
-    def _color(n):
-        if n == X:       return "#4C72B0"
-        if n == Y:       return "#DD8452"
-        if n in latent_nodes: return "#D4B8E0"  # light purple
-        return "#C8C8C8"
-
-    node_colors = [_color(n) for n in G.nodes()]
-    font_colors = {n: "white" if n in (X, Y) else "black" for n in G.nodes()}
-    labels = {n: f"{n}(L)" if n in latent_nodes else str(n) for n in G.nodes()}
-
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-
-    node_size = 700
-    nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_color=node_colors, node_size=node_size)
-    nx.draw_networkx_edges(G, pos=pos, ax=ax, arrows=True, arrowsize=20,
-                           edge_color="#555555", width=1.5,
-                           node_size=node_size,
-                           connectionstyle="arc3,rad=0.15")
-    for node, (x, y) in pos.items():
-        ax.text(x, y, labels[node], ha="center", va="center",
-                fontsize=9, color=font_colors[node], fontweight="bold")
-
-    legend_handles = [
-        mpatches.Patch(color="#4C72B0", label=f"X = {X}  (treatment)"),
-        mpatches.Patch(color="#DD8452", label=f"Y = {Y}  (outcome)"),
-        mpatches.Patch(color="#C8C8C8", label="observed"),
-    ]
-    if latent_nodes:
-        legend_handles.append(mpatches.Patch(color="#D4B8E0", label="latent (L)"))
-    ax.legend(handles=legend_handles, loc="upper left",
-              bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=9)
-    ax.set_title("Causal DAG", fontsize=12)
-    ax.axis("off")
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -105,8 +26,8 @@ def _render_dag_b64(
 
 _F1_INTRO = """\
 You will be given a Directed Acyclic Graph (DAG) representing a structural \
-causal model, along with a visual rendering of the same graph. Nodes are \
-variables. Nodes may be observed or latent/unobserved. A directed edge A→B means A is a direct cause of B.\
+causal model. Nodes are variables. Nodes may be observed or latent/unobserved. \
+A directed edge A→B means A is a direct cause of B.\
 """
 
 _F1_TASK = """\
@@ -177,8 +98,6 @@ def format_problem(
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
-        f"A visual rendering of this DAG is also provided "
-        f"(blue = X, orange = Y, gray = observed, purple = latent).\n\n"
         f"QUESTION\n"
         f"────────\n"
         f"Is ATE = E[Y | do(X=1)] − E[Y | do(X=0)] identifiable from the causal model implied by this DAG? "
@@ -345,48 +264,6 @@ async def answer_correctness(completion, info) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Environment class
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class Flavor1Env(vf.SingleTurnEnv):
-    """SingleTurnEnv that renders each DAG as a PNG and injects it into the prompt.
-
-    setup_state runs once at the start of each rollout. It reconstructs the
-    graph from state["info"], renders it as a base64 PNG, and replaces the
-    last user message's plain-string content with a [text, image_url] list —
-    the multimodal format expected by vision-capable models.
-    """
-
-    async def setup_state(self, state: vf.State, **kwargs) -> vf.State:
-        info = state["info"]
-        G = nx.DiGraph()
-        G.add_nodes_from(info["nodes"])
-        G.add_edges_from(info["edges"])
-
-        b64 = _render_dag_b64(
-            G, info["X"], info["Y"],
-            latent_nodes=set(info.get("latent_nodes", [])),
-        )
-
-        prompt = list(state["prompt"])
-
-        # Upgrade last user message to [text, image].
-        last_user_idx = max(i for i, m in enumerate(prompt) if m["role"] == "user")
-        original_text = prompt[last_user_idx]["content"]
-        prompt[last_user_idx] = {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": original_text},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            ],
-        }
-        state["prompt"] = prompt
-
-        return await super().setup_state(state, **kwargs)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -421,7 +298,7 @@ def load_flavor1() -> Flavor1Env:
         weights=[0.1, 0.1, 0.80],
     )
 
-    return Flavor1Env(
+    return vf.SingleTurnEnv(
         dataset=train_dataset,
         eval_dataset=eval_dataset,
         system_prompt=SYSTEM_PROMPT,

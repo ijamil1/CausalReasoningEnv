@@ -27,7 +27,7 @@ Note: weight index order is [F1, F3, F2, F4] — matching curriculum progression
 
 When implementing Flavors 2–4, reuse these from [flavor1.py](CausalReasoningEnv/flavor1.py) and [data_generation/flavor1_gen.py](CausalReasoningEnv/data_generation/flavor1_gen.py):
 - `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` — DAG generation (in `flavor1_gen.py`)
-- `_render_dag_b64`, `format_problem` — DAG visualization/text rendering (in `flavor1.py`)
+- `format_problem` — DAG text rendering (in `flavor1.py`)
 - `valid_adjustment_set`, `parse_answer` — reward function primitives (in `flavor1.py`)
 
 ### Reward Rubric Conventions (all flavors)
@@ -74,7 +74,7 @@ Phase out `find_adjustment_sets` tool after Phase 1 convergence to force interna
 
 ### Dependencies
 
-Current `pyproject.toml` includes `networkx`, `matplotlib`, `Pillow` (Flavor 1). Add for Flavors 2–4: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
+Current `pyproject.toml` includes `networkx` (Flavor 1). Add for Flavors 2–4: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
 
 ### Self-Maintenance Rule
 

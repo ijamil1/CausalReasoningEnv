@@ -28,7 +28,7 @@ prime env install CausalReasoningEnv -p ./environments
 
 **Task:** Given a DAG with treatment node X, outcome node Y, and a mix of observed/latent nodes: (a) determine the identifiability status of ATE, and (b) produce the appropriate answer — minimal backdoor adjustment set, frontdoor mediator, or a non-identifiability declaration.
 
-**Prompt:** The model receives a text description of the DAG (nodes classified as observed/latent, edge list, X, Y) and a rendered PNG image (blue=X, orange=Y, gray=observed, light purple=latent). The system prompt provides comprehensive causal inference knowledge (d-separation, backdoor/frontdoor criteria, identifiability conditions) without worked examples.
+**Prompt:** The model receives a text description of the DAG (nodes classified as observed/latent, edge list, adjacency, X, Y). The system prompt provides comprehensive causal inference knowledge (d-separation, backdoor/frontdoor criteria, identifiability conditions) without worked examples.
 
 **Expected output formats:**
 ```xml
@@ -53,7 +53,7 @@ prime env install CausalReasoningEnv -p ./environments
 - `status_check` (weight 0.10) — correct identification method declared (backdoor / frontdoor / not_identifiable)
 - `answer_correctness` (weight 0.80) — exact match against any element of `minimal_adjustment_sets` = 1.0; valid but non-minimal = 0.5; wrong type or invalid = 0.0
 
-**Environment type:** `vf.SingleTurnEnv` subclass (`Flavor1Env`). Uses `setup_state()` to inject a base64-encoded PNG of the DAG into the user message as a multimodal image.
+**Environment type:** `vf.SingleTurnEnv` (text-only; no multimodal image injection).
 
 ---
 
@@ -144,4 +144,4 @@ CausalReasoningEnv/
 
 ## Dependencies
 
-Declared in `pyproject.toml`: `verifiers`, `networkx`, `matplotlib`, `datasets`, `scipy`, `pandas`, `statsmodels`.
+Declared in `pyproject.toml`: `verifiers`, `networkx`, `datasets`, `scipy`, `pandas`, `statsmodels`.
