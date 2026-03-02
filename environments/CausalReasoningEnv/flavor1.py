@@ -282,7 +282,7 @@ _EVAL_DATASET_PATH = _DATASET_DIR / "eval"
 _HF_DATASET_ID = "irfanjamil/causal-reasoning-flavor1"
 
 
-def load_flavor1() -> Flavor1Env:
+def load_flavor1() -> vf.SingleTurnEnv:
     """Load the Flavor 1 environment (adjustment set identification).
 
     Datasets are loaded from HuggingFace Hub: irfanjamil/causal-reasoning-flavor1.

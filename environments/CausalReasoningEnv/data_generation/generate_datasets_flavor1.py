@@ -12,7 +12,6 @@ then read them from disk at training / eval time without re-generating.
 # requires-python = ">=3.12"
 # dependencies = [
 #   "networkx>=3.0",
-#   "matplotlib>=3.7",
 #   "datasets",
 #   "scipy",
 #   "pandas",
@@ -25,7 +24,7 @@ import sys
 from collections import Counter
 
 # Make the package root importable when running as a script
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from data_generation.flavor1_gen import build_dataset, generate_stratified_dag_problems
 
@@ -37,7 +36,7 @@ _MIN_NODES = 8
 _MAX_NODES = 12
 _SEED = 42
 
-_DATASET_DIR = pathlib.Path(__file__).parent / "datasets" / "flavor1"
+_DATASET_DIR = pathlib.Path(__file__).parent.parent / "datasets" / "flavor1"
 _TRAIN_DATASET_PATH = _DATASET_DIR / "train"
 _EVAL_DATASET_PATH = _DATASET_DIR / "eval"
 
@@ -76,7 +75,8 @@ def format_problem(
     adj_str = "\n".join(adj_lines)
 
     return (
-        f"DAG:\n"
+        f"DAG INFORMATION\n"
+        f"───────────────\n"
         f"Nodes:    {node_str}\n"
         f"Observed: {obs_str}\n"
         f"Latent:   {lat_str}\n"
@@ -84,12 +84,12 @@ def format_problem(
         f"Adjacency:\n{adj_str}\n\n"
         f"Treatment (X): {X}\n"
         f"Outcome   (Y): {Y}\n\n"
-        f"Determine whether the average treatment effect "
-        f"ATE = E[Y | do(X=1)] − E[Y | do(X=0)] is identifiable from the "
-        f"observed variables. If it is, state the identification method and "
-        f"the required variables. If it is not, respond with not_identifiable in the answer tags. RESPOND ACCORDING TO THE RESPONSE FORMAT SPECIFIED EARLIER.\n\n"
-        f"A visual rendering of this DAG is also provided "
-        f"(blue = X, orange = Y, gray = observed, purple = latent)."
+        f"QUESTION\n"
+        f"────────\n"
+        f"Is ATE = E[Y | do(X=1)] − E[Y | do(X=0)] identifiable from the causal model implied by this DAG? "
+        f"If yes, state the identification method and the required variable set. "
+        f"If not, respond with not_identifiable. "
+        f"Respond according to the response format specified in the system prompt."
     )
 
 
