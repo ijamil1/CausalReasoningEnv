@@ -58,7 +58,7 @@ def format_problem(
         children[u].append(v)
         parents[v].append(u)
 
-    edge_str = ", ".join(f"{u}→{v}" for u, v in sorted(edges))
+    edge_str = ", ".join(f"{u}->{v}" for u, v in sorted(edges))
     node_str = ", ".join(str(n) for n in sorted(nodes))
     obs_str = ", ".join(str(n) for n in sorted(observed_nodes))
     lat_str = ", ".join(str(n) for n in sorted(latent_nodes)) if latent_nodes else "none"
@@ -87,7 +87,7 @@ def format_problem(
         f"QUESTION\n"
         f"────────\n"
         f"Is ATE = E[Y | do(X=1)] − E[Y | do(X=0)] identifiable from the causal model implied by this DAG? "
-        f"If yes, state the identification method and the required variable set. "
+        f"If yes, state the smallest required variable set (excluding {X} and {Y})."
         f"If not, respond with not_identifiable. "
         f"Respond according to the response format specified in the system prompt."
     )

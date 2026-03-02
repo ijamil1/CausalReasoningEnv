@@ -1,5 +1,6 @@
 
 .env
+environments/CausalReasoningEnv/datasets/flavor1
 
 # outputs from `prime eval run`
 ./outputs
@@ -15,4 +16,3 @@ docs/
 rollout_rewards.sh
 .claude/settings.local.json
 scripts/*
-environments/CausalReasoningEnv/datasets

@@ -1,9 +1,11 @@
-"""Flavor 1 — Minimal Adjustment Set Identification.
+"""Flavor 1 — Causal Identification (Minimal Variable Set).
 
 Given a randomly generated DAG with a designated treatment node X and
-outcome node Y, the model must identify the minimal adjustment set Z:
-the smallest set of non-descendants of X whose conditioning blocks all
-backdoor paths between X and Y (via d-separation in the backdoor graph).
+outcome node Y, the model must determine whether ATE is identifiable and,
+if so, report the minimum-sized variable set that enables identification.
+One-summation formulas (backdoor adjustment) are preferred over two-summation
+formulas (front-door mediation); mediation is reported only when no adjustment
+set exists.
 
 Environment type: vf.SingleTurnEnv. The DAG is presented to the model
 as a textual description only (nodes, edges, adjacency, observed/latent status).
@@ -26,15 +28,16 @@ from prompts import build_system_prompt
 
 _F1_INTRO = """\
 You will be given a Directed Acyclic Graph (DAG) representing a structural \
-causal model. Nodes are variables. Nodes may be observed or latent/unobserved. \
+causal model. Nodes are binary variables. Nodes may be observed or latent/unobserved. \
 A directed edge A→B means A is a direct cause of B.\
 """
 
 _F1_TASK = """\
 Given the DAG, determine whether the average treatment effect ATE = E[Y | do(X=1)] − E[Y | do(X=0)] \
-is identifiable, and if so, identify the method \
-(backdoor adjustment set or front-door mediator set) and the required variable set.\
-"""
+is identifiable or not.  If so, identify a minimum-sized set of nodes needed to identify the ATE.
+Prefer identification strategies with fewer summations: use a one-summation
+formula if one exists, and only use a two-summation formula if no one-summation
+identification is possible. Do not include X or Y. """
 
 _F1_RESPONSE_FORMAT = """\
 RESPONSE FORMAT
@@ -42,11 +45,8 @@ RESPONSE FORMAT
 You must follow the following format exactly. Write all reasoning inside a <reasoning> block. After </reasoning>, write \
 exactly one <answer> block using one of these three forms:
 
-  If identifiable via a backdoor adjustment set (including empty set):
+  If identifiable:
       <answer>{N1, N2, ...}</answer>   or   <answer>{}</answer>
-
-  If identifiable via the front-door criterion (for mediator M, use set notation even if M is a single node):
-      <answer>frontdoor: {M1, M2, ...}</answer>
 
   If not identifiable:
       <answer>not_identifiable</answer>
@@ -72,7 +72,7 @@ def format_problem(
         children[u].append(v)
         parents[v].append(u)
 
-    edge_str = ", ".join(f"{u}→{v}" for u, v in sorted(edges))
+    edge_str = ", ".join(f"{u}->{v}" for u, v in sorted(edges))
     node_str = ", ".join(str(n) for n in sorted(nodes))
     obs_str = ", ".join(str(n) for n in sorted(observed_nodes))
     lat_str = ", ".join(str(n) for n in sorted(latent_nodes)) if latent_nodes else "none"
@@ -101,10 +101,9 @@ def format_problem(
         f"QUESTION\n"
         f"────────\n"
         f"Is ATE = E[Y | do(X=1)] − E[Y | do(X=0)] identifiable from the causal model implied by this DAG? "
-        f"If yes, state the identification method and the required variable set. "
+        f"If yes, state the smallest required variable set (excluding {X} and {Y})."
         f"If not, respond with not_identifiable. "
-        f"Respond according to the response format specified in the system prompt."
-    )
+        f"Respond according to the response format specified in the system prompt.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,10 +115,9 @@ def parse_answer(content: str) -> dict | None:
     """Parse the model's <answer> tag into a structured result dict.
 
     Valid forms and returned dicts:
-      <answer>{N1, N2, ...}</answer>         → {"type": "backdoor", "set": frozenset({N1, N2})}
-      <answer>{}</answer>                    → {"type": "backdoor", "set": frozenset()}
-      <answer>frontdoor: {M1, M2}</answer>   → {"type": "frontdoor", "mediators": frozenset({M1, M2})}
-      <answer>not_identifiable</answer>      → {"type": "not_identifiable"}
+      <answer>{N1, N2, ...}</answer>   → {"type": "set", "set": frozenset({N1, N2})}
+      <answer>{}</answer>              → {"type": "set", "set": frozenset()}
+      <answer>not_identifiable</answer> → {"type": "not_identifiable"}
 
     Returns None if no valid form is found or the content is malformed.
     """
@@ -133,25 +131,14 @@ def parse_answer(content: str) -> dict | None:
     if inner == "not_identifiable":
         return {"type": "not_identifiable"}
 
-    # frontdoor: {M1, M2, ...}
-    m = re.match(r"^frontdoor:\s*\{([^}]*)\}$", inner, re.IGNORECASE)
-    if m:
-        body = m.group(1).strip()
-        if body == "":
-            return None  # empty mediator set is invalid
-        try:
-            return {"type": "frontdoor", "mediators": frozenset(int(x.strip()) for x in body.split(","))}
-        except ValueError:
-            return None
-
-    # {N1, N2, ...} or {} — backdoor adjustment set
+    # {N1, N2, ...} or {}
     m = re.match(r"^\{([^}]*)\}$", inner)
     if m:
         body = m.group(1).strip()
         if body == "":
-            return {"type": "backdoor", "set": frozenset()}
+            return {"type": "set", "set": frozenset()}
         try:
-            return {"type": "backdoor", "set": frozenset(int(x.strip()) for x in body.split(","))}
+            return {"type": "set", "set": frozenset(int(x.strip()) for x in body.split(","))}
         except ValueError:
             return None
 
@@ -170,11 +157,10 @@ async def format_compliance(completion) -> float:
 
 
 async def status_check(completion, info) -> float:
-    """Reward: correct identification method declared
+    """Reward: correct identifiability status declared.
 
-    For backdoor problems:   predicted type must be 'backdoor' 
-    For frontdoor problems:  predicted type must be 'frontdoor'.
-    For not_identifiable:    predicted type must be 'not_identifiable'.
+    For any identifiable problem (backdoor, empty, frontdoor): predicted type must be 'set'.
+    For not_identifiable: predicted type must be 'not_identifiable'.
 
     Returns 1.0 on full credit, 0.0 otherwise.
     """
@@ -184,37 +170,29 @@ async def status_check(completion, info) -> float:
         return 0.0
 
     true_status = info["identifiability_status"]
-    # Map ground-truth status → expected predicted type
-    expected_type = {
-        "identifiable":          "backdoor",
-        "empty":                 "backdoor",
-        "identifiable_frontdoor": "frontdoor",
-        "not_identifiable":      "not_identifiable",
-    }.get(true_status)
-
-    if predicted["type"] != expected_type:
-        return 0.0
-
-    return 1.0
+    if true_status == "not_identifiable":
+        return 1.0 if predicted["type"] == "not_identifiable" else 0.0
+    else:
+        return 1.0 if predicted["type"] == "set" else 0.0
 
 
 async def answer_correctness(completion, info) -> float:
     """Reward: exact correctness of the answer (0.80 weight).
 
     Scoring per identifiability status:
-      identifiable (backdoor, non-empty):
-        1.0  — predicted set matches any element of minimal_adjustment_sets
-        0.25 — predicted set is valid but larger than minimum size
-        0.0  — invalid set, wrong type, or unparseable
-      empty (backdoor, empty set):
-        1.0  — predicted set is {}
-        0.0  — anything else
-      identifiable_frontdoor:
-        1.0  — predicted mediator matches mediator_node
-        0.0  — wrong mediator or wrong type
       not_identifiable:
         1.0  — predicted type is 'not_identifiable'
         0.0  — anything else
+      empty (backdoor, empty adjustment set):
+        1.0  — predicted set is {}
+        0.0  — anything else
+      identifiable_frontdoor:
+        1.0  — predicted set matches {mediator_node}
+        0.0  — wrong set or wrong type
+      identifiable (non-empty backdoor):
+        1.0  — predicted set matches any element of minimal_adjustment_sets
+        0.5  — predicted set is a valid but non-minimal backdoor adjustment set
+        0.0  — invalid set, wrong type, or unparseable
     """
     content = completion[-1]["content"]
     predicted = parse_answer(content)
@@ -226,25 +204,21 @@ async def answer_correctness(completion, info) -> float:
     if true_status == "not_identifiable":
         return 1.0 if predicted["type"] == "not_identifiable" else 0.0
 
-    if true_status == "identifiable_frontdoor":
-        if predicted["type"] != "frontdoor":
-            return 0.0
-        gold_mediators = frozenset({info["mediator_node"]})
-        return 1.0 if predicted["mediators"] == gold_mediators else 0.0
-
-    if true_status == "empty":
-        if predicted["type"] != "backdoor":
-            return 0.0
-        return 1.0 if predicted["set"] == frozenset() else 0.0
-
-    # true_status == "identifiable" (non-empty backdoor)
-    if predicted["type"] != "backdoor":
+    # All identifiable cases require a set answer
+    if predicted["type"] != "set":
         return 0.0
 
     predicted_set = predicted["set"]
+
+    if true_status == "empty":
+        return 1.0 if predicted_set == frozenset() else 0.0
+
+    if true_status == "identifiable_frontdoor":
+        return 1.0 if predicted_set == frozenset({info["mediator_node"]}) else 0.0
+
+    # true_status == "identifiable" (non-empty backdoor)
     gold_sets = [frozenset(s) for s in info["minimal_adjustment_sets"]]
 
-    # Exact match against any minimum-size set
     if predicted_set in gold_sets:
         return 1.0
 
