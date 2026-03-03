@@ -176,22 +176,29 @@ async def status_check(completion, info) -> float:
         return 1.0 if predicted["type"] == "set" else 0.0
 
 
-async def answer_correctness(completion, info) -> float:
-    """Reward: exact correctness of the answer (0.80 weight).
+async def answer_quality(completion, info) -> float:
+    """Reward shaping: combines status check + graded answer quality (0.9 weight).
 
-    Scoring per identifiability status:
+    Incorporates status check (wrong identifiability type → 0) and grades the
+    answer on a continuous scale:
+
       not_identifiable:
         1.0  — predicted type is 'not_identifiable'
         0.0  — anything else
       empty (backdoor, empty adjustment set):
         1.0  — predicted set is {}
-        0.0  — anything else
+        0.5 / |predicted_set|  — predicted set is a valid d-separator in the
+                                  backdoor graph (non-empty superset of {}),
+                                  scaled inversely with predicted set size
+        0.0  — predicted set is not a valid d-separator, or wrong type
       identifiable_frontdoor:
         1.0  — predicted set matches {mediator_node}
         0.0  — wrong set or wrong type
       identifiable (non-empty backdoor):
         1.0  — predicted set matches any element of minimal_adjustment_sets
-        0.5  — predicted set is a valid but non-minimal backdoor adjustment set
+        0.5 * min_size / |predicted_set|  — valid but non-minimal backdoor
+                                            adjustment set, scaled inversely
+                                            with ratio of predicted to minimal size
         0.0  — invalid set, wrong type, or unparseable
     """
     content = completion[-1]["content"]
@@ -209,21 +216,32 @@ async def answer_correctness(completion, info) -> float:
         return 0.0
 
     predicted_set = predicted["set"]
-
-    if true_status == "empty":
-        return 1.0 if predicted_set == frozenset() else 0.0
+    X, Y = info["X"], info["Y"]
 
     if true_status == "identifiable_frontdoor":
         return 1.0 if predicted_set == frozenset({info["mediator_node"]}) else 0.0
 
+    if true_status == "empty":
+        if predicted_set == frozenset():
+            return 1.0
+        # Partial: valid d-separator in backdoor graph, scaled by predicted set size
+        G = nx.DiGraph()
+        G.add_nodes_from(info["nodes"])
+        G.add_edges_from(info["edges"])
+        G_bd = G.copy()
+        G_bd.remove_edges_from(list(G.out_edges(X)))
+        if is_d_separator(G_bd, {X}, {Y}, predicted_set):
+            return 0.5 / (len(predicted_set)**2 + 1)
+        return 0.0
+
     # true_status == "identifiable" (non-empty backdoor)
     gold_sets = [frozenset(s) for s in info["minimal_adjustment_sets"]]
+    min_size = min(len(s) for s in gold_sets)
 
     if predicted_set in gold_sets:
         return 1.0
 
-    # Valid but non-minimal: check d-separation and no descendants
-    X, Y = info["X"], info["Y"]
+    # Valid but non-minimal: check no descendants of X, then d-separation
     G = nx.DiGraph()
     G.add_nodes_from(info["nodes"])
     G.add_edges_from(info["edges"])
@@ -232,9 +250,54 @@ async def answer_correctness(completion, info) -> float:
     G_bd = G.copy()
     G_bd.remove_edges_from(list(G.out_edges(X)))
     if is_d_separator(G_bd, {X}, {Y}, predicted_set):
-        return 0.5  # valid but non-minimal
+        return 0.5 * (min_size / len(predicted_set))**2
 
     return 0.0
+
+
+async def answer_correctness(completion, info) -> float:
+    """Binary reward: 1.0 iff the answer exactly matches the golden answer, else 0.0.
+
+    Weight 0 in rubric — used as an evaluation metric only, not for training.
+
+    Scoring per identifiability status:
+      not_identifiable:
+        1.0  — predicted type is 'not_identifiable'
+        0.0  — anything else
+      empty:
+        1.0  — predicted set is {}
+        0.0  — anything else
+      identifiable_frontdoor:
+        1.0  — predicted set matches {mediator_node}
+        0.0  — wrong set or wrong type
+      identifiable (non-empty backdoor):
+        1.0  — predicted set matches any element of minimal_adjustment_sets
+        0.0  — anything else (including valid but non-minimal sets)
+    """
+    content = completion[-1]["content"]
+    predicted = parse_answer(content)
+    if predicted is None:
+        return 0.0
+
+    true_status = info["identifiability_status"]
+
+    if true_status == "not_identifiable":
+        return 1.0 if predicted["type"] == "not_identifiable" else 0.0
+
+    if predicted["type"] != "set":
+        return 0.0
+
+    predicted_set = predicted["set"]
+
+    if true_status == "empty":
+        return 1.0 if predicted_set == frozenset() else 0.0
+
+    if true_status == "identifiable_frontdoor":
+        return 1.0 if predicted_set == frozenset({info["mediator_node"]}) else 0.0
+
+    # identifiable (non-empty backdoor) — exact match only
+    gold_sets = [frozenset(s) for s in info["minimal_adjustment_sets"]]
+    return 1.0 if predicted_set in gold_sets else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,8 +331,8 @@ def load_flavor1() -> vf.SingleTurnEnv:
     eval_dataset = dataset["test"]
 
     rubric = vf.Rubric(
-        funcs=[format_compliance, status_check, answer_correctness],
-        weights=[0.1, 0.1, 0.80],
+        funcs=[format_compliance, status_check, answer_quality, answer_correctness],
+        weights=[0.1, 0.0, 0.9, 0.0],
     )
 
     return vf.SingleTurnEnv(
