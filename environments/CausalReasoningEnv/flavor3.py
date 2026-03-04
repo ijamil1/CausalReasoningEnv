@@ -1,14 +1,18 @@
-"""Flavor 3 — DAG + Fully Specified SCM -> Compute ATE.
+"""Flavor 3 — DAG + Observational Data → Estimate the SCM.
 
 TODO: implement Flavor3Env and load_flavor3().
 
-The model is given a DAG and complete structural equations (functional form,
-parameter values, noise distributions). It must compute ATE analytically:
-  - Linear SCMs (75%): exact numeric ATE via Wright's path-tracing.
-  - Nonlinear SCMs (25%): substituted symbolic formula evaluable by the grader.
+Given a DAG (structure only) and observational data, the model must estimate
+the structural equations — specifically the functional form and parameters for
+a target node (Y) given its causal parents.
 
-All problems must have active confounding (at least one backdoor path) so that
-E[Y|X=x] != E[Y|do(X=x)]. ~15% of problems have canceling paths (ATE ~ 0).
+What it tests: whether the model uses the DAG to select the correct parent
+regressors rather than naively including all correlated variables.
+
+Environment type: vf.ToolEnv (multi-turn).
+Tools: load_data, run_python.
+
+See BENCHMARK_DESIGN.md § Flavor 3 for the full spec.
 """
 
 import verifiers as vf
@@ -16,30 +20,32 @@ import verifiers as vf
 from prompts import build_system_prompt
 
 _F3_INTRO = """\
-You will be given a Directed Acyclic Graph (DAG) and fully specified \
-structural equations with parameter values and noise distributions. Nodes \
-are variables. A directed edge A→B means A is a direct cause of B.\
+You will be given a Directed Acyclic Graph (DAG) and observational data \
+(N=1000 rows). Nodes are variables. A directed edge A→B means A is a \
+direct cause of B. The data was generated from a linear Gaussian SCM.\
+"""
+
+_F3_TASK = """\
+Estimate the structural equation for node Y: regress Y on its causal \
+parents as identified from the DAG (not on correlated non-parents). \
+Use the run_python tool to perform the regression. Report the coefficient \
+for each parent and the noise standard deviation.\
 """
 
 _F3_RESPONSE_FORMAT = """\
 RESPONSE FORMAT
 ────────────────
 Write all reasoning inside a <reasoning> block. After </reasoning>, write \
-exactly one <answer> block using one of these two forms:
+exactly one <answer> block:
 
-  Linear SCM — numeric ATE and CATE:
-      <answer>ATE=[value], CATE=[value]</answer>
+  <answer>Y = [coeff1]·[parent1] + [coeff2]·[parent2] + N(0, [sigma])</answer>
 
-  Nonlinear SCM — symbolic formula for ATE and CATE:
-      <answer>ATE=[formula], CATE=[formula]</answer>
-
-Rules: do not write <answer> inside <reasoning>; for linear SCMs report \
-numbers rounded to 4 significant figures; for nonlinear SCMs write an \
-explicit expectation expression with the structural equations substituted in \
-(e.g. ATE = E_{Z~N(0,1)}[f(1, Z) - f(0, Z)]).\
+Rules: use only Y's causal parents from the DAG as regressors (no intercept \
+unless specified); report coefficients and sigma rounded to 4 significant \
+figures; if Y has no parents, write <answer>Y = N(0, [sigma])</answer>.\
 """
 
-SYSTEM_PROMPT = build_system_prompt(_F3_INTRO, _F3_RESPONSE_FORMAT)
+SYSTEM_PROMPT = build_system_prompt(_F3_INTRO, _F3_RESPONSE_FORMAT, task=_F3_TASK)
 
 
 def load_flavor3() -> vf.Environment:

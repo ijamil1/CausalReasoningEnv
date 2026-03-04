@@ -108,10 +108,10 @@ User: "DAG: [edges]. X=[x], Y=[y].
 
 ### Flavor 2 — ATE Estimation (Analytical + Nonparametric) 🚧 To be implemented
 
-**Overview:** This flavor combines two complementary ATE computation tasks under a single multi-turn tool-use environment.
+**Overview:** This flavor combines two complementary ATE computation tasks under a single multi-turn tool-use environment. The model always receives a DAG. Depending on the problem it may also receive a linear SCM (structural equations), observational data, or neither — the prompt is neutral and does not label the problem type.
 
-- **Sub-case A (~20% of problems):** The model is given a fully specified linear SCM and must compute ATE analytically via directed path-tracing (Wright's rule). No data is provided.
-- **Sub-case B (~80% of problems):** The model is given a DAG and observational data (no SCM). The model must first determine whether ATE is identifiable/estimable, then estimate it nonparametrically from the data if estimable.
+- **SCM-only problems (~20%):** The model is given a fully specified linear SCM and must compute exact ATE via directed path-tracing (Wright's rule). No data is provided.
+- **Data-only problems (~80%):** The model is given a DAG and observational data (no SCM). The model must determine whether ATE is identifiable, then estimate it nonparametrically from the data.
 
 **Environment type:** `vf.ToolEnv` (multi-turn, 8–12 turns). Tools: `load_data`, `check_d_separation`, `run_python`, and `find_adjustment_sets` (training scaffold only — not available at eval time).
 
@@ -129,7 +129,7 @@ User: "DAG: [edges]. X=[x], Y=[y].
 - Y: continuous leaf node (no outgoing edges)
 - No latent variables
 
-Note: CATE is not asked in Sub-case A. In a linear additive model without interaction terms, CATE(Z=z) = ATE for all z — there is no treatment effect heterogeneity.
+Note: CATE is not asked in any Flavor 2 subcase.
 
 **SCM parameter generation:**
 ```
@@ -194,24 +194,26 @@ All ATEs are also confirmed via simulation: 1M samples under do(X=0) and do(X=1)
 **Reward:**
 ```
 format_compliance (0.05): parseable <answer>ATE=...</answer> tag
-status_check      (0.15): Sub-case A is always identifiable; full credit if model
-                          correctly does not declare not_identifiable / not_estimable.
-answer_quality    (0.80): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_true|))
-                          Tight tolerance (10%) — exact algebraic answer expected.
-                          Special case ATE_true = 0: full credit iff |ATE_hat| ≤ 0.05.
+answer_quality    (0.95): 1.0 if |ATE_hat − ATE_true| ≤ 0.01, else 0.0.
+                          No partial credit — the answer is a deterministic algebraic
+                          computation from known coefficients. The 0.01 tolerance exists
+                          only to accommodate floating-point display rounding (e.g., model
+                          writes 0.854 instead of 0.8541). Either all paths are correctly
+                          traced and multiplied or they are not.
+                          Special case ATE_true = 0: full credit iff |ATE_hat| ≤ 0.01.
 ```
 
 ---
 
 #### Sub-case B — Discrete SCM, Nonparametric ATE from Data (~80%)
 
-**What it tests:** (1) Identification status diagnosis — can the model determine whether ATE is identifiable or estimable from the given DAG and data? (2) Nonparametric ATE estimation — given an identifiable case, can the model correctly apply the backdoor or frontdoor formula using discrete frequency counts from the data? (3) CATE for specified covariate strata (backdoor cases only).
+**What it tests:** (1) Identification status diagnosis — can the model determine whether ATE is identifiable from the given DAG and data? (2) Nonparametric ATE estimation — given an identifiable case, can the model correctly apply the backdoor or frontdoor formula using discrete frequency counts from the data?
 
 **Key design principle — do not prescribe the estimation method:** The model is given the DAG and data, NOT the SCM. The principled estimation method for discrete data is nonparametric frequency counting — estimating P(Y=1|X=x, Z=z) as the empirical conditional frequency. Imposing a parametric model (logistic regression, linear probability model) introduces assumptions the data does not require and that the true SCM may violate. The system prompt provides the backdoor and frontdoor identification formulas abstractly but does NOT say "use stratified counting." Whether the model reaches for counting vs. a parametric form is part of what is being measured.
 
-**Identifiability vs. estimability distinction:**
-- `not_identifiable`: a structural property of the DAG — latent confounders block all valid adjustment sets and no frontdoor mediator exists. No amount of data resolves this.
-- `not_estimable`: identification is possible in principle, but the available data lacks sufficient overlap. Both cases require the model to withhold a numeric ATE estimate, but for different structural reasons. Models should distinguish these with different status strings.
+**Identifiability:**
+- `not_identifiable`: a structural property of the DAG — latent confounders block all valid adjustment sets and no frontdoor mediator exists. No amount of data resolves this. Model declares `not_identifiable`.
+- `identifiable`: a valid identification formula exists. Model estimates ATE from the data.
 
 **Variable types:**
 - X: binary (can have parents — binary X with discrete parents is valid via CPTs)
@@ -220,35 +222,27 @@ answer_quality    (0.80): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_tru
 
 **Problem types:**
 ```
-backdoor_standard  (~30%): non-empty minimal adjustment set Z; all variables in Z
+backdoor_standard  (~35%): non-empty minimal adjustment set Z; all variables in Z
                            are observed; all strata Z=z have observations for both
                            X=0 and X=1. Model: identify Z, apply backdoor formula,
-                           estimate ATE and CATE for a specified stratum z₀.
+                           estimate ATE.
 
-backdoor_empty     (~15%): empty adjustment set — X and Y are d-separated in the
+backdoor_empty     (~20%): empty adjustment set — X and Y are d-separated in the
                            backdoor graph (no conditioning needed). Model: recognize
                            no adjustment is required, estimate ATE directly as
-                           P(Y=1|X=1)−P(Y=1|X=0), and estimate CATE.
+                           P(Y=1|X=1)−P(Y=1|X=0).
 
-frontdoor          (~15%): latent U→X, U→Y; no valid backdoor adjustment set.
+frontdoor          (~20%): latent U→X, U→Y; no valid backdoor adjustment set.
                            A valid frontdoor mediator M exists (X→M→Y with all three
                            frontdoor conditions satisfied). Model: identify M, apply
                            the two-step frontdoor formula for ATE.
-                           CATE is NOT asked for frontdoor cases.
 
-not_identifiable   (~20%): latent U→X, U→Y; no valid backdoor adjustment set exists;
+not_identifiable   (~25%): latent U→X, U→Y; no valid backdoor adjustment set exists;
                            no valid frontdoor mediator (conditions violated). ATE
                            cannot be identified from observational data regardless of
                            sample size. Model: declare not_identifiable with a brief
                            structural explanation. Producing a numeric estimate is
                            penalized at 0.
-
-missing_support    (~20%): ATE is structurally identifiable (valid adjustment set Z
-                           exists, all variables observed), but ≥1 stratum Z=z in
-                           the minimal adjustment set has no observations for one
-                           treatment arm (X=1 or X=0). ATE cannot be estimated from
-                           this data. Model: declare not_estimable with an overlap
-                           explanation. Producing a numeric estimate is penalized at 0.
 ```
 
 **SCM generation:**
@@ -273,77 +267,127 @@ missing_support    (~20%): ATE is structurally identifiable (valid adjustment se
 3. Parameterize as conditional probability tables (CPTs):
    - P(V=v | pa(V)) for each node; all probabilities in [0.1, 0.9] (avoid degeneracy).
    - X CPT: P(X=1 | pa(X)) ∈ [0.2, 0.8] for all parent combinations.
+   - Constrain minimal adjustment set size: |Z| ≤ 3. With binary/ternary variables
+     this gives at most 3³ = 27 strata, but CPT probabilities are not uniform so
+     actual stratum counts are highly skewed — N cannot be fixed in advance.
    - Verify identifiability conditions hold before sampling data.
 
-4. Sample N=5000 observations from the joint distribution.
-   Rationale: with binary/ternary adjustment variables and |Z| ≤ 2, there are at
-   most 3² = 9 strata; N=5000 gives ~555 expected obs/stratum — sufficient for
-   stable frequency estimates.
+4. Sample data in a loop until all required cells are sufficiently populated.
+   Required cells for backdoor: every (X=x, Z=z) cell in the cross-product of
+   treatment arms × adjustment set strata that appears in the identification formula.
+   Required cells for frontdoor: every (X=x, M=m) and (X=x', M=m) cell.
+
+   Algorithm:
+     MIN_PER_CELL = 50   # minimum observations per required (X=x, Z=z) cell
+     MAX_N = 100_000     # hard cap; reject problem and resample SCM if not met
+     accumulated = []
+     while min(required_cell_counts(accumulated)) < MIN_PER_CELL:
+         accumulated += sample_batch(SCM, batch_size=1000)
+         if len(accumulated) > MAX_N:
+             reject problem; regenerate DAG + CPTs
+     N = len(accumulated)
+
+   For missing_support problems: only check the cells that are INTENTIONALLY populated
+   (i.e., the treatment arm that is not zeroed out). The zeroed stratum is left absent
+   by design; do not attempt to populate it.
 
 5. Drop latent variable columns from the data CSV.
 
-6. Compute ground truth ATE via exact enumeration over CPTs (not from sampled data):
+6. Compute two ATE quantities and store both:
+
+   (a) true_ATE — exact enumeration over CPTs. Used for dataset quality verification
+       (confirms the sample is a faithful draw from the SCM) and for monitoring. NOT
+       used for grading.
+
+   (b) data_ATE — the ATE implied by the sampled data, computed by applying the
+       identification formula as exact frequency counts over the N-row sample.
+       This is what a correct implementation of counting/frequentism produces and is
+       the grading target. data_ATE ≠ true_ATE due to sampling noise; grading against
+       true_ATE would penalise the model for sampling variance it had no control over.
+
    Backdoor:
-     ATE = Σ_z [P(Y=1|X=1,Z=z) − P(Y=1|X=0,Z=z)] · P(Z=z)
-     CATE(z₀) = P(Y=1|X=1,Z=z₀) − P(Y=1|X=0,Z=z₀)
+     data_ATE = Σ_z [freq(Y=1,X=1,Z=z)/freq(X=1,Z=z)
+                    − freq(Y=1,X=0,Z=z)/freq(X=0,Z=z)] · freq(Z=z)
 
    Frontdoor (M = mediator node):
-     ATE = Σ_m P(M=m|X=1) · Σ_x' P(Y=1|X=x',M=m)·P(X=x')
-         − Σ_m P(M=m|X=0) · Σ_x' P(Y=1|X=x',M=m)·P(X=x')
+     data_ATE = Σ_m freq(M=m|X=1) · Σ_x' freq(Y=1|X=x',M=m)·freq(X=x')
+              − Σ_m freq(M=m|X=0) · Σ_x' freq(Y=1|X=x',M=m)·freq(X=x')
+     (all frequencies computed from the N-row sample)
 
-   not_identifiable / missing_support: true_ATE = None, true_CATE = None
+   not_identifiable:
+     true_ATE = None, data_ATE = None
 
 7. Store per problem:
    edges, observed_nodes, latent_nodes, data_csv (str), X, Y, problem_type,
-   identifiability_status ("identifiable" | "not_identifiable" | "not_estimable"),
-   true_ATE (None if non-estimable), true_CATE (None for frontdoor/not_identifiable/
-   missing_support), adjustment_set (or mediator_node for frontdoor).
+   identifiability_status ("identifiable" | "not_identifiable"),
+   true_ATE (None if not_identifiable), data_ATE (None if not_identifiable),
+   adjustment_set (or mediator_node for frontdoor).
    CPTs are NOT stored in the info dict — the model never sees them.
 ```
 
 **What the model sees:**
 ```
-- DAG edge list
-- List of observed nodes and latent nodes
-- Full data CSV (N=5000 rows, observed columns only), accessible via load_data tool
-- X and Y designated
-- For backdoor_standard and backdoor_empty: a CATE question specifying Z=z₀
+- DAG edge list (always)
+- List of observed nodes and latent nodes (always)
+- Observational data CSV (observed columns only), accessible via load_data tool
+- X and Y designated (always)
 ```
 
 **Answer format:**
+
+The prompt does not label problem type. The model answers based on what information is available.
+
 ```xml
-<!-- Identifiable, backdoor, ATE + CATE -->
-<reasoning>[d-separation analysis, adjustment set identification, counting steps]</reasoning>
-<answer>status=identifiable, ATE=0.24, CATE=0.31</answer>
+<!-- SCM-only (path-tracing, exact) -->
+<reasoning>[analysis]</reasoning>
+<ate_type>exact</ate_type>
+<extra_nodes>{}</extra_nodes>
+<answer>ATE=0.54</answer>
 
-<!-- Identifiable, frontdoor, ATE only -->
-<answer>status=identifiable, ATE=0.18</answer>
+<!-- Backdoor non-empty (empirical) -->
+<ate_type>empirical</ate_type>
+<extra_nodes>{2, 5}</extra_nodes>
+<answer>ATE=0.18</answer>
 
-<!-- Not identifiable (structural failure) -->
-<answer>status=not_identifiable, reason=latent U blocks all adjustment sets and no valid frontdoor mediator exists</answer>
+<!-- Backdoor empty / frontdoor (empirical, mediator or no extra nodes) -->
+<ate_type>empirical</ate_type>
+<extra_nodes>{4}</extra_nodes>
+<answer>ATE=0.24</answer>
 
-<!-- Not estimable (overlap failure) -->
-<answer>status=not_estimable, reason=no X=1 observations for stratum Z=2</answer>
+<!-- ATE not identifiable -->
+<answer>not_identifiable</answer>
 ```
+
+`<ate_type>` declares whether the ATE is `exact` (computed from structural equations via path-tracing) or `empirical` (estimated from data). `<extra_nodes>` lists node IDs beyond X and Y that appear in the ATE calculation; `{}` if none. Both tags are omitted only when declaring `not_identifiable`.
+
+The grader parses the answer and infers the declared status from whether a numeric
+value is present (`identifiable`) or the sentinel string is present.
 
 **Reward:**
 ```
 format_compliance (0.05): parseable <answer> block
-status_check      (0.15): correct status string declared
-                          (identifiable / not_identifiable / not_estimable): 1.0
-                          wrong status: 0.0
+status_check      (0.10): correct identifiability status declared
+formula_quality   (0.15): correct <ate_type> and <extra_nodes> tags
+  - not_identifiable declared: 1.0 (tags omitted, no penalty)
+  - ate_type score (0.5): "exact" for SCM subcase, "empirical" for data subcase
+  - extra_nodes score (0.5): correct set of non-X/Y node IDs
+      SCM-only: {} (no extra nodes)
+      Backdoor non-empty: adjustment set Z
+      Backdoor empty: {}
+      Frontdoor: mediator node M
 
-answer_quality    (0.80):
-  For identifiable (backdoor_standard, backdoor_empty, frontdoor):
-    ATE accuracy:  max(0, 1 − |ATE_hat − ATE_true| / (0.3 · |ATE_true|))      [0.55]
-    Special case: ATE_true = 0 → full credit iff |ATE_hat| ≤ 0.05
-    CATE accuracy (backdoor_standard, backdoor_empty only):
-      max(0, 1 − |CATE_hat − CATE_true| / (0.4 · |CATE_true|))                [0.15]
-    Correct adjustment set / mediator identified in answer                     [0.10]
+answer_quality    (0.70):
+  For identifiable (backdoor_standard, backdoor_empty, frontdoor, SCM subcases):
+    Grading target is data_ATE — the ATE implied by the provided sample via exact
+    frequency counting (or exact ATE for SCM subcase).
 
-  For not_identifiable or not_estimable:
-    Correct flag + reason matching the actual failure type: 1.0
-    Numeric estimate produced (even if numerically close to true value): 0.0
+    ATE:  max(0, 1 − |ATE_hat − data_ATE| / (0.30 · |data_ATE|))
+
+    Special case data_ATE = 0: full credit iff |ATE_hat| ≤ 0.05.
+
+  For not_identifiable:
+    Correct sentinel string present: 1.0
+    Numeric estimate produced: 0.0
 ```
 
 ---
@@ -491,12 +535,7 @@ These design principles apply across all three flavors to ensure tasks are diffi
    Use β values like 0.73, 1.17, −0.84 rather than 0.5, 1.0, −1.0.
    Prevents pattern-matching to textbook values.
 
-5. CATE questions (Flavor 2B, backdoor cases only)
-   Subquestions test whether effect heterogeneity is correctly attributed to
-   the right covariates. CATE(z₀) requires the model to estimate the stratum-specific
-   conditional effect, not just report the marginal ATE.
-
-6. Large DAGs (~20% of problems, all flavors)
+5. Large DAGs (~20% of problems, all flavors)
    10–16 node DAGs. Path tracking at scale is genuinely hard regardless of
    algorithm knowledge — the number of paths grows combinatorially and manual
    enumeration is error-prone.
@@ -569,35 +608,34 @@ See `flavor1.py` for the full reward function implementations.
 
 #### Flavor 2 — ATE Estimation
 
-**Sub-case A (linear SCM, no data):**
+**SCM-only problems (subcase="A"):**
 ```
 format_compliance (0.05): parseable <answer>ATE=...</answer> tag
-status_check      (0.15): Sub-case A is always identifiable; reward 1.0 if model
-                          does not declare not_identifiable / not_estimable
-answer_quality    (0.80): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_true|))
+status_check      (0.10): always identifiable; reward 1.0 if model does not
+                          declare not_identifiable
+formula_quality   (0.15): correct <ate_type> ("exact") + <extra_nodes> ({}) tags
+answer_quality    (0.70): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_true|))
                           Special case ATE_true=0: full credit iff |ATE_hat| ≤ 0.05
 ```
 
-**Sub-case B (discrete data):**
+**Data-only problems (subcase="B"):**
 ```
-format_compliance  (0.05): parseable <answer> block with correct field names
-status_check       (0.15): correct status string
-                           (identifiable / not_identifiable / not_estimable): 1.0
+format_compliance  (0.05): parseable <answer> block
+status_check       (0.10): correct status (identifiable / not_identifiable): 1.0
+formula_quality    (0.15): correct <ate_type> and <extra_nodes> tags
+                           (see formula_quality in flavor2.py for full scoring)
 
-answer_quality     (0.80):
+answer_quality     (0.70):
   identifiable (backdoor_standard, backdoor_empty, frontdoor):
-    ATE accuracy: max(0, 1 − |ATE_hat − ATE_true| / (0.3·|ATE_true|))         [0.55]
-    Special case ATE_true=0: full credit iff |ATE_hat| ≤ 0.05
-    CATE accuracy (backdoor_standard, backdoor_empty only):
-      max(0, 1 − |CATE_hat − CATE_true| / (0.4·|CATE_true|))                  [0.15]
-    Correct adjustment set / mediator identified                               [0.10]
+    ATE accuracy: max(0, 1 − |ATE_hat − data_ATE| / (0.3·|data_ATE|))
+    Special case data_ATE=0: full credit iff |ATE_hat| ≤ 0.05
 
-  not_identifiable or not_estimable:
-    Correct flag + reason matching the actual failure type: 1.0
+  not_identifiable:
+    Correct sentinel declared: 1.0
     Numeric estimate produced regardless: 0.0
 ```
 
-**Implementation note for Sub-case A vs. B dispatch:** The `info` dict for each problem includes a `subcase` field (`"A"` or `"B"`). Reward functions must branch on this field.
+**Implementation note for SCM-only vs. data-only dispatch:** The `info` dict for each problem includes a `subcase` field (`"A"` or `"B"`). Reward functions branch on this field.
 
 #### Flavor 3 — Estimate SCM from Data
 ```
@@ -743,10 +781,11 @@ See the full Flavor 2 spec in Part I above (Sub-case A and Sub-case B sections).
 - `build_dataset(problems, format_fn)` → HuggingFace `Dataset`
 
 `flavor2.py` must implement:
-- `format_problem_2a(...)` — renders Sub-case A problem (structural equations + DAG)
-- `format_problem_2b(...)` — renders Sub-case B problem (DAG + data snippet)
-- `parse_answer_2(content)` — parses `<answer>ATE=...` or `<answer>status=..., ATE=..., CATE=...`
-- Reward functions: `format_compliance`, `status_check`, `answer_quality`
+- `format_problem(...)` — unified renderer (DAG always shown; SCM and data shown conditionally)
+- `parse_answer_2(content)` — parses `<answer>ATE=...` or `<answer>not_identifiable</answer>`
+- `parse_ate_type(content)` — extracts `<ate_type>` tag content ("exact" or "empirical")
+- `parse_extra_nodes(content)` — extracts node IDs from `<extra_nodes>` tag
+- Reward functions: `format_compliance`, `status_check`, `formula_quality`, `answer_quality`
   (see Reward Rubric section above for weight and scoring details)
 - `load_flavor2()` → `vf.ToolEnv` with the tools listed in Part III
 

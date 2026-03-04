@@ -2,7 +2,7 @@ model = "Qwen/Qwen2.5-7B-Instruct"
 
 [env]
 id = "CausalReasoningEnv"
-args = {weights = [0.4, 0.6, 0.0, 0.0]}   # Flavor 1 + Flavor 3
+args = {weights = [0.5, 0.5, 0.0]}   # Flavor 1 + Flavor 2
 
 [inference]
 gpus = 1

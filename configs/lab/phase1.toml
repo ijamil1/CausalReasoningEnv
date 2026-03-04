@@ -13,7 +13,7 @@ max_tokens = 10000
 
 [[env]]
 id = "irfanjamil/CausalReasoningEnv@0.1.1"
-args = {weights = [1.0, 0.0, 0.0, 0.0]}   # Flavor 1 only
+args = {weights = [1.0, 0.0, 0.0]}   # Flavor 1 only
 
 [eval]
 interval = 250                    # Evaluate every 250 steps

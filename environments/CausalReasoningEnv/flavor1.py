@@ -28,8 +28,7 @@ from prompts import build_system_prompt
 
 _F1_INTRO = """\
 You will be given a Directed Acyclic Graph (DAG) representing a structural \
-causal model. Nodes are binary variables. Nodes may be observed or latent/unobserved. \
-A directed edge A→B means A is a direct cause of B.\
+causal model (SCM). Nodes are binary variables. Nodes may be observed or latent/unobserved. \
 """
 
 _F1_TASK = """\

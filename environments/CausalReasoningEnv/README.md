@@ -61,21 +61,19 @@ prime env install CausalReasoningEnv -p ./environments
 
 ### Flavor 2 — ATE Estimation 🚧 To be implemented
 
-**Overview:** Two sub-cases combined into a single `vf.ToolEnv`. X is always binary. All problems require the model to reason about do() and correctly apply the relevant identification formula.
+**Overview:** Problems always include a DAG. Depending on the problem type, the model may also receive a linear SCM (structural equations), observational data, or neither. The prompt is neutral — it does not label the problem type. The model must determine from context what information is available and apply the appropriate method.
 
 ---
 
-#### Sub-case A — Linear SCM, Analytical Path-Tracing (~20% of Flavor 2 problems)
+#### SCM-only problems (~20% of Flavor 2 problems)
 
 **What the model receives:** A fully specified linear SCM (structural equations with numeric coefficients) and the DAG. No data.
 
-**Task:** Compute ATE = E[Y|do(X=1)] − E[Y|do(X=0)] as a numeric value by tracing all directed paths from X to Y and summing the products of edge coefficients (Wright's rule).
+**Task:** Compute exact ATE = E[Y|do(X=1)] − E[Y|do(X=0)] by tracing all directed paths from X to Y and summing the products of edge coefficients (Wright's rule).
 
-**Why X is always a root node:** Binary X is incompatible with a linear structural equation that has parents (a linear function of continuous parents is continuous, not binary). Therefore X ~ Bernoulli(p) with no parents. Since X has no parents, there are no confounders — ATE is always identifiable. The task is purely path computation.
+**Why X is always a root node:** Binary X is incompatible with a linear structural equation that has parents. Therefore X ~ Bernoulli(p) with no parents — no confounders, always identifiable. The task is purely path computation.
 
 **Variable types:** X binary, all other nodes continuous (linear Gaussian), Y continuous.
-
-**CATE:** Not asked in Sub-case A. Without interaction terms, CATE(Z=z) = ATE for all z.
 
 **Problem sub-types:**
 - `standard` (~40%): 1–2 directed X→Y paths, ATE ≠ 0
@@ -83,62 +81,60 @@ prime env install CausalReasoningEnv -p ./environments
 - `canceling` (~20%): ≥2 opposing-sign paths; each path contribution ≥ 0.4; ATE ≈ 0
 - `no_path` (~10%): no directed X→Y path; ATE = 0 (identifiable, trivially zero)
 
-**Ground truth:** Wright's path-tracing sum, confirmed by 1M-sample simulation.
-
 **Answer format:**
 ```xml
 <reasoning>[path enumeration and coefficient products]</reasoning>
+<ate_type>exact</ate_type>
+<extra_nodes>{}</extra_nodes>
 <answer>ATE=0.27</answer>
 ```
 
-**Reward:** `format_compliance` (0.05) + `status_check` (0.15) + `answer_quality` (0.80).
-ATE tolerance: 10% relative error. ATE=0 case: full credit iff |ATE_hat| ≤ 0.05.
+**Reward:** `format_compliance` (0.05) + `status_check` (0.10) + `formula_quality` (0.15) + `answer_quality` (0.70).
 
 ---
 
-#### Sub-case B — Discrete SCM, Nonparametric ATE from Data (~80% of Flavor 2 problems)
+#### Data-only problems (~80% of Flavor 2 problems)
 
-**What the model receives:** A DAG (with observed/latent node labels) and N=5000 rows of observational data (CSV, observed columns only). No SCM.
+**What the model receives:** A DAG (with observed/latent node labels) and N rows of observational data (CSV, observed columns only). No SCM.
 
-**Task:** (a) Determine whether ATE is identifiable from this DAG and estimable from this data. (b) If estimable: estimate ATE nonparametrically. (c) If backdoor-identifiable: estimate CATE for a specified covariate stratum.
-
-**Key principle:** The prompt provides the backdoor and frontdoor identification formulas abstractly but does NOT prescribe the estimation method. For discrete data, the principled estimator is frequency counting (empirical conditional probabilities). Whether the model imposes a parametric form vs. counts directly is part of what is measured.
+**Task:** (a) Determine whether ATE is identifiable from this DAG. (b) If identifiable: estimate ATE nonparametrically from the data.
 
 **Variable types:** X binary, Y binary, all other nodes binary or ternary discrete.
 
-**Identifiability / estimability distinction:**
-- `not_identifiable` — structural failure: latent confounder blocks all adjustment sets and no frontdoor mediator exists. No data can fix this. Model declares `not_identifiable`.
-- `not_estimable` — empirical failure: identification is structurally possible but data lacks overlap (one treatment arm absent in ≥1 stratum). Model declares `not_estimable`.
-
 **Problem types:**
-- `backdoor_standard` (~30%): non-empty adjustment set Z, all observed, full support. Model estimates ATE and CATE(z₀).
-- `backdoor_empty` (~15%): empty adjustment set — X and Y already d-separated in backdoor graph. Model estimates ATE and CATE(z₀).
-- `frontdoor` (~15%): latent U→X, U→Y; valid frontdoor mediator M. Model applies two-step frontdoor formula. CATE not asked.
-- `not_identifiable` (~20%): latent confounder, no valid backdoor or frontdoor. Model declares `not_identifiable`.
-- `missing_support` (~20%): valid adjustment set exists, but ≥1 stratum has no X=1 (or X=0) obs. Model declares `not_estimable`.
+- `backdoor_standard` (~35%): non-empty adjustment set Z, all observed, full support. Model estimates ATE.
+- `backdoor_empty` (~20%): empty adjustment set — X and Y already d-separated in backdoor graph. Model estimates ATE.
+- `frontdoor` (~20%): latent U→X, U→Y; valid frontdoor mediator M. Model applies two-step frontdoor formula.
+- `not_identifiable` (~25%): latent confounder, no valid backdoor or frontdoor. Model declares `not_identifiable`.
 
-**Ground truth ATE:** Exact CPT enumeration (not from sampled data).
-- Backdoor: `ATE = Σ_z [P(Y=1|X=1,Z=z) − P(Y=1|X=0,Z=z)] · P(Z=z)`
-- Frontdoor: two-step formula over mediator M
+**Ground truth stored per problem:**
+- `true_ATE`: exact CPT enumeration — for dataset quality checks only, not for grading.
+- `data_ATE`: ATE implied by the N-row sample via exact frequency counting. This is the grading target.
 
-**Answer formats:**
+**Answer format:** The prompt is neutral; the model answers based on available information.
+
 ```xml
-<!-- Identifiable, backdoor -->
-<answer>status=identifiable, ATE=0.24, CATE=0.31</answer>
+<!-- Backdoor (non-empty adjustment set) -->
+<ate_type>empirical</ate_type>
+<extra_nodes>{3, 5}</extra_nodes>
+<answer>ATE=0.24</answer>
 
-<!-- Identifiable, frontdoor (no CATE) -->
-<answer>status=identifiable, ATE=0.18</answer>
+<!-- Backdoor empty / no extra nodes -->
+<ate_type>empirical</ate_type>
+<extra_nodes>{}</extra_nodes>
+<answer>ATE=0.18</answer>
 
-<!-- Not identifiable (structural) -->
-<answer>status=not_identifiable, reason=latent U blocks all adjustment sets; no valid frontdoor mediator</answer>
+<!-- Frontdoor -->
+<ate_type>empirical</ate_type>
+<extra_nodes>{4}</extra_nodes>
+<answer>ATE=0.18</answer>
 
-<!-- Not estimable (overlap failure) -->
-<answer>status=not_estimable, reason=no X=1 observations for stratum Z=2</answer>
+<!-- Not identifiable -->
+<answer>not_identifiable</answer>
 ```
 
-**Reward:** `format_compliance` (0.05) + `status_check` (0.15) + `answer_quality` (0.80).
-ATE tolerance: 30% relative error. CATE tolerance: 40% relative error (backdoor only).
-Non-estimable/non-identifiable: correct flag + correct reason = 1.0; numeric estimate = 0.0.
+**Reward:** `format_compliance` (0.05) + `status_check` (0.10) + `formula_quality` (0.15) + `answer_quality` (0.70).
+`formula_quality`: 0.5 for correct `<ate_type>` + 0.5 for correct `<extra_nodes>` set. `answer_quality` is graded against `data_ATE`.
 
 **Tools available:** `check_d_separation`, `load_data`, `run_python`, `find_adjustment_sets` (training only).
 
