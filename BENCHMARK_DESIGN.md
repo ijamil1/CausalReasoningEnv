@@ -2,7 +2,7 @@
 
 ## Context
 
-The existing `CausalReasoningEnv_1` benchmarks only one causal task — minimal adjustment set identification — and does so with heavy scaffolding (detailed ICL examples, step-by-step instructions). The goal is to expand this into a full causal reasoning benchmark covering four distinct "flavors" of tasks that together test end-to-end causal analysis competency, then design a multi-turn tool-use training environment with a principled reward rubric to train models toward this benchmark.
+The existing `CausalReasoningEnv_1` benchmarks only one causal task — minimal adjustment set identification — and does so with heavy scaffolding (detailed ICL examples, step-by-step instructions). The goal is to expand this into a full causal reasoning benchmark covering three distinct "flavors" of tasks that together test end-to-end causal analysis competency, then design a multi-turn tool-use training environment with a principled reward rubric to train models toward this benchmark.
 
 ---
 
@@ -106,215 +106,289 @@ User: "DAG: [edges]. X=[x], Y=[y].
 
 ---
 
-### Flavor 2 — DAG + Observational Data → Estimate ATE via Counting
+### Flavor 2 — ATE Estimation (Analytical + Nonparametric) 🚧 To be implemented
 
-**Task:** Given a DAG and observational data: (a) determine whether ATE is estimable from the available data, (b) if yes, estimate ATE = E[Y(do(X=1))] - E[Y(do(X=0))] using nonparametric counting, and (c) estimate CATE for specified covariate values.
+**Overview:** This flavor combines two complementary ATE computation tasks under a single multi-turn tool-use environment.
 
-**What it tests:** Identification status diagnosis; nonparametric backdoor estimation; recognizing data limitations (unobserved variables, missing treatment support, auxiliary variables); CATE estimation and effect heterogeneity.
+- **Sub-case A (~20% of problems):** The model is given a fully specified linear SCM and must compute ATE analytically via directed path-tracing (Wright's rule). No data is provided.
+- **Sub-case B (~80% of problems):** The model is given a DAG and observational data (no SCM). The model must first determine whether ATE is identifiable/estimable, then estimate it nonparametrically from the data if estimable.
 
-**Key design intent:** The model is given the DAG and data only — **not the SCM or its functional form**. The underlying SCM is nonlinear. The correct approach is to apply the backdoor formula nonparametrically: estimate E[Y | X=x, Z=z] by grouped averaging over the data, then marginalize over P(Z=z). Step 0 is always to check whether ATE is even estimable — some problems require the model to flag non-identifiability rather than attempt estimation.
+**Environment type:** `vf.ToolEnv` (multi-turn, 8–12 turns). Tools: `load_data`, `check_d_separation`, `run_python`, and `find_adjustment_sets` (training scaffold only — not available at eval time).
 
-**Variable types:** All variables are discrete.
-- **X: binary (0/1)** — ATE = E[Y|do(X=1)] - E[Y|do(X=0)] is unambiguous with binary treatment.
-- **Z (adjustment covariates): discrete (multi-category)** — counting is exact; no binning or kernel methods required.
-- **Y: binary** — P(Y=1|X=x, Z=z) estimated directly by grouped frequency.
+---
 
-Using discrete variables means OLS is model-misspecified, so the model gains nothing by assuming linearity; stratified counting is exact.
+#### Sub-case A — Linear SCM, Analytical Path-Tracing (~20%)
 
-**Problem Types (stratified sampling at generation time):**
+**What it tests:** Does the model correctly apply do(X=x) by mutilating incoming edges to X and tracing ALL directed paths from X to Y, multiplying edge coefficients along each path and summing across paths? A model that reports only the direct structural coefficient β_XY from Y's equation — ignoring mediated paths — will fail on mediated and canceling-path problems.
+
+**Why X must be a root node:** In a linear SCM, every node V satisfies `V = Σβᵢ·parentᵢ + ε`. Any node with parents inherits a continuous distribution from them and is itself continuous-valued. There is no way to make such a node binary while preserving the linear structural equation: thresholding introduces a step function (nonlinear), and a logistic link produces a Bernoulli mechanism (not a linear SCM). Therefore, binary X requires X to be exogenous — a root node with no parents (including no latent parents). Since X is a root node, no confounders of X exist (a confounder U→X, U→Y would make U a parent of X). Consequently, ATE is always identifiable in Sub-case A — the identifiability challenge is absent. The task is purely analytical path computation.
+
+**Variable types:**
+- X: binary root node, `X ~ Bernoulli(p)`, p ∈ [0.3, 0.7]
+- All other nodes: linear continuous, `V = Σ β_i · parent_i + ε`,  ε ~ N(0, σ²)
+- Y: continuous leaf node (no outgoing edges)
+- No latent variables
+
+Note: CATE is not asked in Sub-case A. In a linear additive model without interaction terms, CATE(Z=z) = ATE for all z — there is no treatment effect heterogeneity.
+
+**SCM parameter generation:**
 ```
-(a) Standard: valid adjustment set exists and all required variables are observed;
-    enough data for all strata. Model estimates ATE and CATE.
-
-(b) Multi-dimensional Z: minimal adjustment set has ≥2 variables, each with 3+ categories
-    → ≥9 strata; some strata sparse (< 5 obs). Model must handle sparse strata correctly
-    (report estimate with caveat, or flag insufficient data for that stratum).
-
-(c) Unobserved adjustment variable: one variable in the minimal adjustment set is
-    absent from the data CSV. Model should:
-      - First check if an alternative valid adjustment set exists using observed variables.
-      - If no alternative exists: flag ATE is not estimable. Do NOT compute a biased estimate.
-
-(d) Missing treatment support: all rows have X=0 (or X=1), so P(Y|X=1, Z=z) cannot be
-    estimated from data. Model must flag ATE cannot be computed due to lack of overlap.
-
-(e) Auxiliary variables: data CSV contains 1–3 variables not present in the DAG,
-    labeled "auxiliary_1", "auxiliary_2", etc. Model must use the DAG as a filter
-    and ignore these variables entirely. Adjusting for auxiliaries is penalized.
+- 5–10 total nodes
+- β_i ~ Uniform([0.2, 1.5] ∪ [−1.5, −0.2])  — non-round values (e.g. 0.73, −1.17, 0.84)
+- σ ~ Uniform(0.1, 0.5) per node
+- Y is always a leaf node (no outgoing edges)
 ```
 
-**Critiques & Pointers:**
-- **Two failure modes.** Log separately: (i) did the model correctly diagnose identifiability status? (ii) given correct status, did it compute ATE accurately? These are independent sources of failure.
-- **Model rejection risk.** Mitigated by using discrete variables (counting is exact) and by framing the prompt around stratified averaging without parametric assumptions.
-- **Confounding is required for estimable problems.** Every type (a)/(b)/(e) problem must have at least one active backdoor path. The naive marginal difference must differ from true ATE by ≥15%.
-- **Sparse strata are a genuine test.** For type (b), some Z-combinations will have very few observations. The model must handle this gracefully — either reporting the estimate with a reliability caveat or noting the strata are too sparse to estimate reliably.
-
-**Data Generation:**
+**Problem sub-types:**
 ```
-1. Sample problem type according to stratification weights above
-2. Generate DAG + discrete nonlinear SCM:
-   - Root nodes: Bernoulli or categorical
-   - Non-root nodes: P(V=1|parents) = sigmoid(Σ β_i · parent_i + β_ij · parent_i · parent_j)
-3. Sample N=2000 rows
-4. Apply type-specific data modification:
-   - Type (b): ensure ≥2 Z variables with ≥3 categories each; verify sparse strata exist
-   - Type (c): remove one required adjustment variable column from the CSV
-   - Type (d): filter data to keep only rows where X=0 (or X=1)
-   - Type (e): generate 1–3 independent Bernoulli/categorical variables; append with
-               "auxiliary_N" column names; tell model these are auxiliary
-5. True ATE/CATE: exact enumeration over the true interventional distribution
-   ATE = Σ_z [P(Y=1|X=1,Z=z) - P(Y=1|X=0,Z=z)] · P(Z=z)
-   CATE(z0) = P(Y=1|X=1,Z=z0) - P(Y=1|X=0,Z=z0)
-6. Store: edges, data CSV, X, Y, problem_type, identifiability_status,
-   true_ATE (null for types c/d), true_CATE_cases, adjustment_set
-   (SCM parameters NOT stored — model never sees them)
+standard   (~40%): 1–2 directed X→Y paths, ATE ≠ 0, no sign cancellation.
+                   Example: X→Y (direct coeff 0.73) + X→M→Y (mediator chain).
+                   Model must sum both path contributions, not just report β_XY.
+
+mediated   (~30%): ≥2 directed paths through mediators; no direct X→Y edge required.
+                   Key test: model must identify ALL directed paths, not only the
+                   direct link from X to Y.
+
+canceling  (~20%): ≥2 directed paths with opposing signs.
+                   Requirement: each path's absolute contribution ≥ 0.4; ATE within
+                   ±0.05 of 0. A model reporting only the direct path coefficient fails.
+
+no_path    (~10%): no directed X→Y path exists; ATE = 0 by construction.
+                   ATE is still identifiable — intervening produces zero change.
+                   Test: does the model correctly conclude ATE=0 rather than
+                   hallucinating a path or refusing to answer?
 ```
 
-**Evaluation:**
+**Ground truth ATE:**
 ```
-- Correct identifiability_status: 0.20
-- For estimable (types a/b/e):
-    ATE numeric accuracy: max(0, 1 - |ATE_hat - ATE_true| / (0.5 · |ATE_true|))  [0.50]
-    CATE accuracy: same formula, 20% tolerance  [0.15]
-    Correct adjustment set used: binary check  [0.15]
-- For not-estimable (types c/d):
-    Correct flag + correct reason: 0.80
-    Attempting numeric estimate anyway: 0.0 regardless of proximity to true value
+ATE = Σ_{all directed paths P: X →...→ Y}  Π_{(u,v) ∈ P}  β_{u,v}
+
+This is Wright's path-tracing rule applied to the mutilated graph do(X=x).
+Since X is a root node, do(X=x) removes no edges (X has no parents).
+Trace all directed paths from X to Y; multiply the structural coefficients
+along each path; sum across paths.
+
+ATE_true = 0 for the no_path sub-type.
+All ATEs are also confirmed via simulation: 1M samples under do(X=0) and do(X=1).
 ```
 
-**Benchmark Prompt Sketch:**
+**What the model sees:**
 ```
-System: [Comprehensive causal inference knowledge prompt — see Prompt Design Strategy section]
+- DAG edge list
+- Full structural equations in text form, e.g.:
+    X  ~ Bernoulli(0.45)
+    Z1 = N(0, 1)
+    Z2 = 0.73·Z1 + N(0, 0.4)
+    M  = 1.17·X + 0.61·Z2 + N(0, 0.3)
+    Y  = −0.84·X + 0.95·M + N(0, 0.5)
+- X and Y designated
+- No data (load_data is not applicable for Sub-case A)
+```
 
-User: "DAG: [edges]. Treatment X=[x] (binary), Outcome Y=[y] (binary).
-Observed variables in data: [list — may omit some DAG nodes].
-[If type (e):] Also present but not in the DAG: auxiliary_1, auxiliary_2 (ignore these).
-Data (first 5 rows shown; full data available via load_data tool): [CSV snippet]
+**Answer format:**
+```xml
+<reasoning>[path enumeration and coefficient product computation]</reasoning>
+<answer>ATE=0.27</answer>
+```
 
-(a) Is ATE estimable from this data and DAG? State yes/no and why.
-(b) If yes: estimate ATE = E[Y(do(X=1))] - E[Y(do(X=0))]. Use stratified counting
-    over the adjustment set — do not assume a parametric functional form.
-(c) If yes: estimate CATE for Z = [z_values].
-(d) If yes: what is CATE(Z=z1) - CATE(Z=z2)?
-<answer>estimable=[yes/no], reason=[...], ATE=[...], CATE=[...]</answer>"
+**Reward:**
+```
+format_compliance (0.05): parseable <answer>ATE=...</answer> tag
+status_check      (0.15): Sub-case A is always identifiable; full credit if model
+                          correctly does not declare not_identifiable / not_estimable.
+answer_quality    (0.80): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_true|))
+                          Tight tolerance (10%) — exact algebraic answer expected.
+                          Special case ATE_true = 0: full credit iff |ATE_hat| ≤ 0.05.
 ```
 
 ---
 
-### Flavor 3 — DAG + Fully Specified SCM → Compute ATE
+#### Sub-case B — Discrete SCM, Nonparametric ATE from Data (~80%)
 
-**Task:** Given a DAG and complete structural equations (functional form + parameter values + noise distributions), compute ATE = E[Y|do(X=1)] - E[Y|do(X=0)].
+**What it tests:** (1) Identification status diagnosis — can the model determine whether ATE is identifiable or estimable from the given DAG and data? (2) Nonparametric ATE estimation — given an identifiable case, can the model correctly apply the backdoor or frontdoor formula using discrete frequency counts from the data? (3) CATE for specified covariate strata (backdoor cases only).
 
-- **Linear SCMs (75%):** Produce the exact numeric ATE via algebraic reasoning (Wright's path-tracing).
-- **Nonlinear SCMs (25%):** Produce a substituted symbolic formula for ATE that the grader can evaluate numerically.
+**Key design principle — do not prescribe the estimation method:** The model is given the DAG and data, NOT the SCM. The principled estimation method for discrete data is nonparametric frequency counting — estimating P(Y=1|X=x, Z=z) as the empirical conditional frequency. Imposing a parametric model (logistic regression, linear probability model) introduces assumptions the data does not require and that the true SCM may violate. The system prompt provides the backdoor and frontdoor identification formulas abstractly but does NOT say "use stratified counting." Whether the model reaches for counting vs. a parametric form is part of what is being measured.
 
-**What it tests:** Understanding of the do() operator — specifically that do(X=x) mutilates the graph by removing all edges into X and fixing X=x. Tests whether the model truly understands causal vs. observational conditioning, and whether it can derive ATE from a fully specified SCM without data.
+**Identifiability vs. estimability distinction:**
+- `not_identifiable`: a structural property of the DAG — latent confounders block all valid adjustment sets and no frontdoor mediator exists. No amount of data resolves this.
+- `not_estimable`: identification is possible in principle, but the available data lacks sufficient overlap. Both cases require the model to withhold a numeric ATE estimate, but for different structural reasons. Models should distinguish these with different status strings.
 
-**Differentiation from Flavor 2:**
+**Variable types:**
+- X: binary (can have parents — binary X with discrete parents is valid via CPTs)
+- Y: binary → ATE = P(Y=1|do(X=1)) − P(Y=1|do(X=0))
+- All other variables: binary or ternary (2–3 categories)
 
-| | Flavor 2 | Flavor 3 |
-|---|---|---|
-| Given | DAG + data (no SCM) | DAG + full SCM (no data) |
-| Method | Nonparametric counting from data | Analytical derivation from SCM |
-| Linear output | Numeric ATE | Numeric ATE |
-| Nonlinear output | Numeric ATE | **Substituted symbolic formula** |
-
-**Critiques & Pointers:**
-- **Linear-Gaussian shortcut.** For linear Gaussian SCMs, capable models may pattern-match to "extract the direct path coefficient." Include DAGs with confounders + mediators where this is wrong. The ATE via do() is the sum of direct path coefficients along all X→Y directed paths (after mutilation); the naive OLS coefficient on X picks up confounding bias. The core test: model correctly applies path-tracing, not OLS.
-- **Confusing E[Y|X=x] with E[Y|do(X=x)].** This is the central conceptual test. All problems must have confounding so these differ.
-- **Canceling paths.** Explicitly include ~15% of problems where X→Y (coeff +β) and X→M→Y (indirect, coeff −β·γ) nearly cancel, giving ATE ≈ 0. Both individual paths are non-trivially non-zero (|β| ≥ 0.5, |β·γ| ≥ 0.4). Models that just report the direct coefficient will be wrong; path-tracing is required.
-- **Nonlinear formula output.** The model writes the ATE as an explicit expectation with SCM functions substituted in — e.g., `ATE = E_{Z1~N(0,1)}[tanh(2·1 + 0.5·Z1) - tanh(2·0 + 0.5·Z1)]`. This is distinct from the abstract identification formula (which Flavor 1 already tests) and is numerically evaluable by the grader.
-- **Counterfactuals extension.** An advanced variant: E[Y_{X=1} | X=0, Y=y_obs] — requires twin network / abduction step. Optional hard tier for future work.
-
-**Data Generation:**
+**Problem types:**
 ```
-1. Generate DAG with confounders (at least one active backdoor path)
-2. Parameterize SCM:
-   - 75% linear: V = Σ(β_i · parent_i) + N(0, σ_V), β_i ~ Uniform(0.2, 1.5)
-     (use non-round coefficients: e.g., 0.73, 1.17, −0.84)
-   - 25% nonlinear: V = tanh(Σ(β_i · parent_i)) + N(0, 0.2) or quadratic mixtures
-3. ~15% of problems: enforce canceling paths (ATE target ≈ 0)
-   - Set β_direct and β_indirect such that their sum is within ±0.05 of 0
-   - Verify |β_direct| ≥ 0.5 and |β_indirect| ≥ 0.4 (both paths non-trivial)
-   - Store has_canceling_paths: bool in info dict
-4. Linear ATE: via Wright's path-tracing (sum of directed path products X→Y)
-5. All ATE ground truth: simulation (1M samples under do(X=0) and do(X=1))
-6. True CATE(Z1=z1): condition on Z1=z1 in the intervention distribution
-7. Store: edges, SCM equations as text, true_ATE, true_CATE_cases,
-   scm_type ("linear" | "nonlinear"), has_canceling_paths
-```
+backdoor_standard  (~30%): non-empty minimal adjustment set Z; all variables in Z
+                           are observed; all strata Z=z have observations for both
+                           X=0 and X=1. Model: identify Z, apply backdoor formula,
+                           estimate ATE and CATE for a specified stratum z₀.
 
-**Benchmark Prompt Sketches:**
+backdoor_empty     (~15%): empty adjustment set — X and Y are d-separated in the
+                           backdoor graph (no conditioning needed). Model: recognize
+                           no adjustment is required, estimate ATE directly as
+                           P(Y=1|X=1)−P(Y=1|X=0), and estimate CATE.
 
-*Linear version — numeric ATE + CATE:*
-```
-System: [Comprehensive causal inference knowledge prompt — see Prompt Design Strategy section]
+frontdoor          (~15%): latent U→X, U→Y; no valid backdoor adjustment set.
+                           A valid frontdoor mediator M exists (X→M→Y with all three
+                           frontdoor conditions satisfied). Model: identify M, apply
+                           the two-step frontdoor formula for ATE.
+                           CATE is NOT asked for frontdoor cases.
 
-User: "DAG: [edges].
-Structural equations:
-  Z1 = N(0, 1)
-  Z2 = 0.73·Z1 + N(0, 0.5)
-  X  = 1.17·Z2 + N(0, 0.3)   [do(X=x): this equation is replaced by X=x]
-  Y  = 0.84·X − 0.81·M + N(0, 0.4)   [M is a mediator on X→M→Y]
-  M  = 0.97·X + N(0, 0.2)
+not_identifiable   (~20%): latent U→X, U→Y; no valid backdoor adjustment set exists;
+                           no valid frontdoor mediator (conditions violated). ATE
+                           cannot be identified from observational data regardless of
+                           sample size. Model: declare not_identifiable with a brief
+                           structural explanation. Producing a numeric estimate is
+                           penalized at 0.
 
-(a) Compute ATE = E[Y|do(X=1)] - E[Y|do(X=0)]
-(b) Compute CATE for Z2 = 1.0
-<answer>ATE=[...], CATE=[...]</answer>"
+missing_support    (~20%): ATE is structurally identifiable (valid adjustment set Z
+                           exists, all variables observed), but ≥1 stratum Z=z in
+                           the minimal adjustment set has no observations for one
+                           treatment arm (X=1 or X=0). ATE cannot be estimated from
+                           this data. Model: declare not_estimable with an overlap
+                           explanation. Producing a numeric estimate is penalized at 0.
 ```
 
-*Nonlinear version — substituted symbolic formula + CATE:*
+**SCM generation:**
 ```
-System: [Comprehensive causal inference knowledge prompt — see Prompt Design Strategy section]
+1. Generate DAG (5–10 nodes, Erdős–Rényi with forward topological ordering).
+   Apply the same type-specific structural filters used in Flavor 1:
+   - backdoor_standard/empty: ≥1 undirected backdoor path; minimal adjustment set
+     exists and all variables in it are observed.
+   - frontdoor: add latent U with U→X and U→Y; verify valid mediator M on X→M→Y
+     satisfying all three frontdoor conditions.
+   - not_identifiable: add latent U with U→X and U→Y; verify no valid observed
+     adjustment set exists and no valid frontdoor mediator exists.
+   - missing_support: generate a valid backdoor_standard problem, then post-hoc
+     zero out all X=1 rows (or X=0 rows) for ≥1 stratum of the adjustment set.
 
-User: "DAG: [edges].
-Structural equations:
-  Z1 = N(0, 1)
-  X  = ... [do(X=x): this equation is replaced by X=x]
-  Y  = tanh(2.0·X + 0.5·Z1) + N(0, 0.1)
+2. Assign variable types:
+   - X and Y: always binary.
+   - Other nodes: randomly assign binary (60%) or ternary (40%) per node.
+   - Latent nodes appear in the causal structure but are NEVER included in the
+     data CSV.
 
-(a) Write ATE = E[Y|do(X=1)] - E[Y|do(X=0)] as an explicit expectation expression
-    with the structural equations substituted in.
-(b) Write CATE for Z1 = 0.5 as an explicit expression.
-<answer>ATE=[formula], CATE=[formula]</answer>"
+3. Parameterize as conditional probability tables (CPTs):
+   - P(V=v | pa(V)) for each node; all probabilities in [0.1, 0.9] (avoid degeneracy).
+   - X CPT: P(X=1 | pa(X)) ∈ [0.2, 0.8] for all parent combinations.
+   - Verify identifiability conditions hold before sampling data.
+
+4. Sample N=5000 observations from the joint distribution.
+   Rationale: with binary/ternary adjustment variables and |Z| ≤ 2, there are at
+   most 3² = 9 strata; N=5000 gives ~555 expected obs/stratum — sufficient for
+   stable frequency estimates.
+
+5. Drop latent variable columns from the data CSV.
+
+6. Compute ground truth ATE via exact enumeration over CPTs (not from sampled data):
+   Backdoor:
+     ATE = Σ_z [P(Y=1|X=1,Z=z) − P(Y=1|X=0,Z=z)] · P(Z=z)
+     CATE(z₀) = P(Y=1|X=1,Z=z₀) − P(Y=1|X=0,Z=z₀)
+
+   Frontdoor (M = mediator node):
+     ATE = Σ_m P(M=m|X=1) · Σ_x' P(Y=1|X=x',M=m)·P(X=x')
+         − Σ_m P(M=m|X=0) · Σ_x' P(Y=1|X=x',M=m)·P(X=x')
+
+   not_identifiable / missing_support: true_ATE = None, true_CATE = None
+
+7. Store per problem:
+   edges, observed_nodes, latent_nodes, data_csv (str), X, Y, problem_type,
+   identifiability_status ("identifiable" | "not_identifiable" | "not_estimable"),
+   true_ATE (None if non-estimable), true_CATE (None for frontdoor/not_identifiable/
+   missing_support), adjustment_set (or mediator_node for frontdoor).
+   CPTs are NOT stored in the info dict — the model never sees them.
+```
+
+**What the model sees:**
+```
+- DAG edge list
+- List of observed nodes and latent nodes
+- Full data CSV (N=5000 rows, observed columns only), accessible via load_data tool
+- X and Y designated
+- For backdoor_standard and backdoor_empty: a CATE question specifying Z=z₀
+```
+
+**Answer format:**
+```xml
+<!-- Identifiable, backdoor, ATE + CATE -->
+<reasoning>[d-separation analysis, adjustment set identification, counting steps]</reasoning>
+<answer>status=identifiable, ATE=0.24, CATE=0.31</answer>
+
+<!-- Identifiable, frontdoor, ATE only -->
+<answer>status=identifiable, ATE=0.18</answer>
+
+<!-- Not identifiable (structural failure) -->
+<answer>status=not_identifiable, reason=latent U blocks all adjustment sets and no valid frontdoor mediator exists</answer>
+
+<!-- Not estimable (overlap failure) -->
+<answer>status=not_estimable, reason=no X=1 observations for stratum Z=2</answer>
+```
+
+**Reward:**
+```
+format_compliance (0.05): parseable <answer> block
+status_check      (0.15): correct status string declared
+                          (identifiable / not_identifiable / not_estimable): 1.0
+                          wrong status: 0.0
+
+answer_quality    (0.80):
+  For identifiable (backdoor_standard, backdoor_empty, frontdoor):
+    ATE accuracy:  max(0, 1 − |ATE_hat − ATE_true| / (0.3 · |ATE_true|))      [0.55]
+    Special case: ATE_true = 0 → full credit iff |ATE_hat| ≤ 0.05
+    CATE accuracy (backdoor_standard, backdoor_empty only):
+      max(0, 1 − |CATE_hat − CATE_true| / (0.4 · |CATE_true|))                [0.15]
+    Correct adjustment set / mediator identified in answer                     [0.10]
+
+  For not_identifiable or not_estimable:
+    Correct flag + reason matching the actual failure type: 1.0
+    Numeric estimate produced (even if numerically close to true value): 0.0
 ```
 
 ---
 
-### Flavor 4 — DAG + Observational Data → Estimate the SCM
+### Flavor 3 — DAG + Observational Data → Estimate the SCM 🚧 To be implemented
 
 **Task:** Given a DAG (structure only) and observational data, estimate the structural equations — i.e., the functional form and parameters for each node given its causal parents.
 
-**What it tests:** Whether the model understands that structural equations are estimated by regressing each node on its *causal parents* (per the DAG), not on all correlated variables.
+**What it tests:** Whether the model understands that structural equations are estimated by regressing each node on its *causal parents* (per the DAG), not on all correlated variables. The key causal insight is variable selection: use parents, not correlated variables.
 
-**Critiques & Pointers:**
-- **Risk of triviality.** If the functional form is given (linear), this reduces to "run OLS for each node on its parents" — essentially a statistics exercise, not a causal reasoning test. The causal insight is the variable selection step (use parents, not correlated variables).
+**Design principles:**
 - **Make the selection problem hard.** Include nodes with high correlation to non-parents (due to shared ancestors). Test whether the model uses the DAG to correctly select parent regressors vs. naively including all correlated variables.
-- **This flavor best tested as a multi-step tool-use task.** Model should: (1) read DAG, (2) for each node list its parents, (3) run regression, (4) report coefficients.
-- **Evaluation.** For each node, compute mean relative error of estimated structural coefficients. Also check: did the model regress on the correct set of parents? (Binary check per node — selection accuracy.)
-- **Could be reframed more interestingly.** Instead of "estimate the full SCM," ask "estimate the structural equation for X specifically" — which requires knowing X's parents from the DAG but NOT adjusting for X's children or X's non-parent ancestors. This tests DAG-reading + causal Markov condition understanding.
-- **Consider merging with Flavor 2.** Flavor 4 (estimate SCM) is a natural precursor to Flavor 2 (use SCM to compute ATE). Could present as a two-step problem.
+- **Best tested as a multi-step tool-use task.** Model should: (1) read DAG, (2) for each node list its parents, (3) run regression via `run_python`, (4) report coefficients.
+- **Focus on a single target node.** Rather than asking for the full SCM, ask "estimate the structural equation for Y specifically." This requires reading Y's parents from the DAG but NOT conditioning on Y's children or Y's non-parent ancestors. This tests DAG-reading + causal Markov condition understanding.
 
 **Data Generation:**
 ```
-1. Generate DAG + linear Gaussian SCM (same as Flavor 2/3)
+1. Generate DAG + linear Gaussian SCM
 2. Sample N=1000 rows
-3. Include distractor variables: report correlations in data that don't correspond to
-   parent relationships
+3. Include distractor variables: variables correlated with Y's parents via shared
+   ancestors, but not direct parents of Y. These appear in the data and will tempt
+   the model to include them as regressors.
 4. True structural coefficients stored per node
 5. Store: edges, data CSV, true_structural_equations: {node: {parent: coeff, noise_var: σ}}
 ```
 
 **Benchmark Prompt Sketch:**
 ```
-System: "You are a causal inference expert. The DAG tells you each node's
-causal parents. Structural equations are: V = Σ(β_i · parent_i) + ε, ε ~ N(0, σ).
-Estimate structural coefficients by regressing each node on its DAG parents only."
+System: [Comprehensive causal inference knowledge prompt]
 
-User: "DAG: [edges]. Data: [CSV].
-Estimate the structural equation for node Y. Report: coefficients for each parent
-and the noise standard deviation.
+User: "DAG: [edges]. Data: [CSV snippet; full data via load_data].
+Estimate the structural equation for node Y. Use only Y's causal parents
+as regressors (per the DAG). Report coefficients for each parent and the
+noise standard deviation.
 <answer>Y = [coeff1]·[parent1] + [coeff2]·[parent2] + N(0, [sigma])</answer>"
+```
+
+**Evaluation:**
+```
+format_compliance (0.05)
+answer_quality    (0.95):
+  Per-parent coefficient accuracy: mean over parents of
+    max(0, 1 − |β_hat − β_true| / (0.2 · |β_true|))                          [0.60]
+  Correct parent set selected (binary check per node):
+    1.0 if model regressed on exactly the DAG parents of Y; 0.0 otherwise     [0.35]
 ```
 
 ---
@@ -324,16 +398,17 @@ and the noise standard deviation.
 
 ### Prompt Design Strategy
 
-**All four flavors use the same comprehensive system prompt.** The model is not told which flavor it is solving or which algorithm to apply. The same prompt is used regardless of task type.
+**All three flavors use the same comprehensive system prompt.** The model is not told which flavor it is solving or which algorithm to apply. The same prompt is used regardless of task type.
 
 **Definitional, not prescriptive.** The system prompt provides complete causal inference knowledge — d-separation, backdoor criterion, frontdoor criterion, do-calculus, ATE/CATE definitions, identifiability conditions — but does NOT say "apply X for this task." Knowledge is provided; the model must determine which knowledge is applicable.
 
 **Zero worked examples.** No few-shot demonstrations. The model applies knowledge to novel inputs via structural reasoning, not template-matching to demonstrated procedures.
 
-**Identification status is always the first output.** All flavors ask: "Is the target quantity identifiable/estimable from the given information?" This is the hardest question and the one most resistant to prompt hacking, because it requires case-by-case structural analysis of the specific graph, not application of a memorized algorithm.
+**Identification status is always the first output.** All three flavors ask: "Is the target quantity identifiable/estimable from the given information?" This is the hardest question and the one most resistant to prompt hacking, because it requires case-by-case structural analysis of the specific graph, not application of a memorized algorithm.
 
 **Why this design is robust to prompt optimization:**
 A prompt that provides all relevant causal knowledge still requires the model to:
+
 1. Read the specific DAG structure correctly
 2. Determine which identification strategy is applicable (structural reasoning)
 3. Verify that all conditions for that strategy are met on this specific instance
@@ -390,18 +465,18 @@ Status: IV identification is complex to reward automatically; include as a
 
 ### Cross-Cutting Hardeners
 
-These design principles apply across all four flavors to ensure tasks are difficult regardless of prompt quality.
+These design principles apply across all three flavors to ensure tasks are difficult regardless of prompt quality.
 
 ```
-1. Identification status as primary output (~20% of problems require "not estimable")
-   Every flavor begins with identifiability diagnosis. "ATE is not estimable" is
-   always a valid answer. Attempting a numeric estimate when the answer is
-   "not estimable" is always penalized, even if the estimate happens to be close.
+1. Identification status as primary output (~20% of problems require "not_identifiable"
+   or "not_estimable"). Every flavor begins with identifiability/estimability diagnosis.
+   Attempting a numeric estimate when the answer is "not identifiable/estimable" is
+   always penalized at 0, even if the estimate happens to be numerically close.
 
-2. ATE = 0 and CATE = 0 traps (~10% of problems)
-   True effect is exactly zero due to canceling directed paths, or X genuinely
-   has no causal effect on Y. Models are biased toward finding a nonzero effect.
-   Zero is rewarded at full credit if |estimate| ≤ 0.05.
+2. ATE = 0 traps (~10% of problems)
+   True effect is exactly zero due to canceling directed paths (Flavor 2A) or X
+   genuinely has no causal effect on Y (no directed X→Y path). Models are biased
+   toward finding a nonzero effect. Zero is rewarded at full credit if |estimate| ≤ 0.05.
 
 3. Near-miss condition failures (~15% of problems)
    An identification strategy almost applies but one structural condition is
@@ -412,22 +487,17 @@ These design principles apply across all four flavors to ensure tasks are diffic
    - A collider on one path is a non-collider on another → no valid set
    Model must diagnose the specific failure, not just declare "not identifiable."
 
-4. Auxiliary variables in data (Flavors 2, 4)
-   1–3 variables in the data CSV labeled "auxiliary_N" are not present in the DAG.
-   The model must use the DAG as a filter; including auxiliaries in adjustment
-   is penalized even if it produces an accurate numeric result.
-
-5. Non-round structural coefficients (Flavors 3, 4)
+4. Non-round structural coefficients (Flavors 2A, 3)
    Use β values like 0.73, 1.17, −0.84 rather than 0.5, 1.0, −1.0.
    Prevents pattern-matching to textbook values.
 
-6. CATE and difference-in-CATE (Flavors 2, 3)
-   Optional subquestions test whether effect heterogeneity is correctly attributed
-   to the right covariates. "What is CATE(Z=z1) − CATE(Z=z2)?" requires the model
-   to compute and compare conditional effects, not just report a marginal average.
+5. CATE questions (Flavor 2B, backdoor cases only)
+   Subquestions test whether effect heterogeneity is correctly attributed to
+   the right covariates. CATE(z₀) requires the model to estimate the stratum-specific
+   conditional effect, not just report the marginal ATE.
 
-7. Large DAGs (~20% of problems, all flavors)
-   12–16 node DAGs. Path tracking at scale is genuinely hard regardless of
+6. Large DAGs (~20% of problems, all flavors)
+   10–16 node DAGs. Path tracking at scale is genuinely hard regardless of
    algorithm knowledge — the number of paths grows combinatorially and manual
    enumeration is error-prone.
 ```
@@ -438,89 +508,107 @@ These design principles apply across all four flavors to ensure tasks are diffic
 
 ### Architecture: Multi-Turn Tool Environment
 
-Use `vf.ToolEnv` (or `vf.StatefulToolEnv` if code execution state needs to persist across turns) as the base. All four flavors can be trained jointly via `vf.EnvGroup` with separate sub-environments per flavor.
+Use `vf.ToolEnv` as the base. All three flavors are trained jointly via `vf.EnvGroup` with separate sub-environments per flavor. Flavor 1 is a `vf.SingleTurnEnv`; Flavors 2 and 3 are `vf.ToolEnv` instances.
 
-For Flavors 2 and 4 (which require computation over data), embed a Python REPL via `vf.PythonEnv` or expose a `run_python` tool backed by Prime Sandboxes. For Flavors 1 and 3 (graph-theoretic or analytic), a simpler `vf.ToolEnv` suffices.
+For Flavors 2 and 3 (which require computation over data), expose a `run_python` tool for pandas/numpy operations and a `load_data` tool for accessing the CSV. Flavor 2 Sub-case A (linear SCM) uses the same tool set but `load_data` is not applicable — the problem is fully specified in the prompt.
 
-**Max turns:** 8–12 (enough for plan → adjust_set_check → regression → ATE_calc → finalize)
+**Max turns:** 8–12 (enough for: d-separation check → adjustment set confirmation → data loading → frequency counting → ATE computation → answer)
 
 ### Tools to Expose
 
 ```python
 async def check_d_separation(edges: list[list[int]], X: int, Y: int, Z: list[int]) -> str:
-    """Check if Z d-separates X from Y in the given DAG (with X's outgoing edges removed).
+    """Check if Z d-separates X from Y in the backdoor graph (X's outgoing edges removed).
     Args:
         edges: List of [u, v] directed edges.
-        X: Treatment node.
-        Y: Outcome node.
-        Z: Proposed conditioning set.
-    Returns: "d-separated" or "not d-separated" with explanation.
+        X: Treatment node index.
+        Y: Outcome node index.
+        Z: Proposed conditioning set (list of node indices).
+    Returns: "d-separated" or "not d-separated" with a brief explanation.
     """
 
 async def find_adjustment_sets(edges: list[list[int]], X: int, Y: int) -> str:
-    """Find all minimal valid adjustment sets for X → Y in the given DAG.
-    Returns: JSON list of minimal adjustment sets and whether they exist.
-    NOTE: Available during training only; removed for benchmark evaluation.
-    """
-
-async def get_descendants(edges: list[list[int]], node: int) -> str:
-    """Return all descendants of a node in the DAG (for the no-descendant check).
+    """Find all minimal valid adjustment sets for (X, Y) in the given DAG.
+    Returns: JSON list of minimal adjustment sets (may be empty list if none exist).
+    NOTE: Available during training only as a scaffold. Removed at eval time.
     """
 
 async def run_python(code: str) -> str:
-    """Execute Python code and return stdout + stderr.
-    Use for: OLS regression (statsmodels/sklearn), ATE estimation, data manipulation.
-    pandas, numpy, statsmodels, sklearn are available.
+    """Execute Python code in a persistent session and return stdout + stderr.
+    Use for: frequency counting over data, path arithmetic, ATE computation.
+    Available packages: pandas, numpy, statsmodels, sklearn, scipy.
     """
 
 async def load_data(format: str = "head") -> str:
     """Load the observational dataset for this problem.
     Args:
         format: 'head' (first 10 rows), 'describe' (summary stats), 'full' (all rows as CSV)
+    Not applicable for Flavor 2 Sub-case A (no data provided).
     """
 ```
 
-**Design note:** Don't expose `find_adjustment_sets` during evaluation (benchmark mode) — it gives away the answer. Use it during training as a scaffold to get dense reward signal early, then phase it out via a curriculum (or apply a reward penalty for using it).
+**Design note:** `find_adjustment_sets` is a training scaffold only. Use it early in training to provide dense reward signal on Flavor 1 and Flavor 2B. After convergence on graph reasoning tasks, remove the tool or penalize its use to force the model to internalize graph reasoning.
 
 ### Reward Rubric
 
-Each flavor gets its own rubric, combined via `vf.EnvGroup`. Within each flavor, the rubric has 4 layers:
+Each flavor has its own rubric, combined via `vf.EnvGroup`. Reward weights are per-flavor; the EnvGroup aggregates by sampling weight.
 
-#### Layer 1: Format Compliance (weight 0.05 across all flavors)
-```python
-async def format_compliance(completion) -> float:
-    # Check: exactly one <answer>...</answer> tag, parseable content
-    return 1.0 if parse_answer(completion) is not None else 0.0
+#### Flavor 1 — Adjustment Set Identification
+```
+format_compliance (0.10): one parseable <answer> block
+status_check      (0.00): monitoring only (correct identification strategy declared)
+answer_quality    (0.90): graded answer correctness
+  - not_identifiable: 1.0 if predicted type is not_identifiable
+  - empty: 1.0 if predicted set is {}; partial credit for valid non-empty superset
+  - frontdoor: 1.0 if predicted set matches {mediator_node}
+  - identifiable (backdoor): 1.0 if predicted set ∈ minimal_adjustment_sets;
+                              partial credit for valid but non-minimal sets
+answer_correctness (0.00): binary exact-match metric (monitoring only, weight 0)
+```
+See `flavor1.py` for the full reward function implementations.
+
+#### Flavor 2 — ATE Estimation
+
+**Sub-case A (linear SCM, no data):**
+```
+format_compliance (0.05): parseable <answer>ATE=...</answer> tag
+status_check      (0.15): Sub-case A is always identifiable; reward 1.0 if model
+                          does not declare not_identifiable / not_estimable
+answer_quality    (0.80): max(0, 1 − |ATE_hat − ATE_true| / (0.1 · |ATE_true|))
+                          Special case ATE_true=0: full credit iff |ATE_hat| ≤ 0.05
 ```
 
-#### Layer 2: Identification Status + Intermediate Process (weight 0.20)
-- **All flavors:** Correct identifiability/estimability status declaration (prerequisite).
-  If status is wrong, total score is capped at 0.20 regardless of numeric accuracy.
-- **Flavor 1:** Was the proposed adjustment set valid (even if not minimal)?
-- **Flavor 2:** Did the model use a valid adjustment set over observed variables?
-- **Flavor 3:** Did the model correctly identify which paths survive the do() mutilation?
-- **Flavor 4:** Did the model correctly identify each node's parents from the DAG?
+**Sub-case B (discrete data):**
+```
+format_compliance  (0.05): parseable <answer> block with correct field names
+status_check       (0.15): correct status string
+                           (identifiable / not_identifiable / not_estimable): 1.0
 
-```python
-async def identifiability_status_check(completion, info) -> float:
-    # Check model's declared status against info["identifiability_status"]
-    # Returns 1.0 for correct, 0.0 for wrong
+answer_quality     (0.80):
+  identifiable (backdoor_standard, backdoor_empty, frontdoor):
+    ATE accuracy: max(0, 1 − |ATE_hat − ATE_true| / (0.3·|ATE_true|))         [0.55]
+    Special case ATE_true=0: full credit iff |ATE_hat| ≤ 0.05
+    CATE accuracy (backdoor_standard, backdoor_empty only):
+      max(0, 1 − |CATE_hat − CATE_true| / (0.4·|CATE_true|))                  [0.15]
+    Correct adjustment set / mediator identified                               [0.10]
 
-async def validity_check(completion, info, state) -> float:
-    # Re-use valid_adjustment_set logic from existing code
-    # Extended per flavor — returns partial credit for correct intermediate steps
+  not_identifiable or not_estimable:
+    Correct flag + reason matching the actual failure type: 1.0
+    Numeric estimate produced regardless: 0.0
 ```
 
-#### Layer 3: Answer Correctness (weight 0.80)
-- **Flavor 1 (identifiable):** Exact match against any element of `all_minimal_adjustment_sets` = 1.0. Valid but non-minimal = 0.25. Jaccard partial credit with minimality penalty.
-- **Flavor 1 (not identifiable):** Correct diagnosis + structural explanation = 1.0. Produces a set anyway = 0.0.
-- **Flavor 2 (estimable):** ATE relative error: `max(0, 1 - |ATE_hat - ATE_true| / (0.5·|ATE_true|))` [0.50]; CATE same formula 20% tolerance [0.15]; correct adjustment set used [0.15].
-- **Flavor 2 (not estimable):** Correct flag + correct reason = 1.0. Numeric estimate attempted anyway = 0.0.
-- **Flavor 3 (linear):** Relative error formula, tight tolerance (±1%). ATE [0.60] + CATE [0.20] where applicable.
-- **Flavor 3 (nonlinear):** Grader evaluates substituted symbolic formula via Monte Carlo (1M samples), ±5% tolerance. ATE formula [0.60] + CATE formula [0.20] where applicable.
-- **Flavor 4:** Mean relative error across all structural coefficients [0.60]; per-node parent selection accuracy [0.20].
+**Implementation note for Sub-case A vs. B dispatch:** The `info` dict for each problem includes a `subcase` field (`"A"` or `"B"`). Reward functions must branch on this field.
 
-#### Layer 4: Monitoring Metrics (weight 0 — observability only)
+#### Flavor 3 — Estimate SCM from Data
+```
+format_compliance (0.05): parseable <answer> tag
+answer_quality    (0.95):
+  Per-parent coefficient accuracy: mean over parents of
+    max(0, 1 − |β_hat − β_true| / (0.2 · |β_true|))                           [0.60]
+  Correct parent set selected (Y's DAG parents, no more, no less): 1.0 / 0.0  [0.35]
+```
+
+#### Monitoring Metrics (weight 0 — all flavors)
 ```python
 async def used_graph_tool(completion) -> float:
     # Did the model call check_d_separation or find_adjustment_sets?
@@ -531,74 +619,58 @@ async def used_python_tool(completion) -> float:
 async def num_tool_calls(completion) -> float:
     # Total number of tool calls (efficiency metric)
 
-async def identified_correct_adjustment_set_before_estimation(completion, info) -> float:
-    # For Flavor 2: did the model log a valid adjustment set in its reasoning
-    # before running regression? Parsed from <reasoning> block.
+async def identified_adjustment_set_before_estimation(completion, info) -> float:
+    # Flavor 2B: did the model state a valid adjustment set in its reasoning
+    # before calling run_python for ATE estimation? Parsed from <reasoning> block.
 ```
 
-### Reward Shaping Strategy
+### Curriculum Strategy
 
-**Curriculum by flavor difficulty:**
-1. Phase 1 (warm-up): Flavor 1 only. Establish graph reasoning and format compliance.
-2. Phase 2: Add Flavor 3. Model learns do() operator with exact algebraic answers.
-3. Phase 3: Add Flavor 2 (data → counting ATE). Tool use + nonparametric estimation pipeline.
-4. Phase 4: Add Flavor 4 (data → SCM). Full end-to-end: parent selection + regression.
-
-**Advancing the curriculum — manual phase transitions via TOML args:**
-
-All phases use the same single environment (`CausalReasoningEnv_2`) and the same `env_id`.
-Curriculum is controlled by passing different `weights` args to `load_environment()` via
-separate TOML configs. Sub-environments with weight 0 are not instantiated (lazy loading),
-so only the active flavors load their datasets.
+**Three-phase curriculum via TOML configs.** All phases use the same env `id = "CausalReasoningEnv"`. Curriculum is controlled by the `weights` arg. Flavors with weight 0 are not instantiated (lazy loading).
 
 ```toml
-# configs/vf-rl/phase1.toml
+# configs/lab/phase1.toml  — Flavor 1 only
 [env]
-id = "CausalReasoningEnv_2"
-args = {"weights": [1.0, 0.0, 0.0, 0.0]}   # F1 only
+id = "CausalReasoningEnv"
+args = {"weights": [1.0, 0.0, 0.0]}
 
-# configs/vf-rl/phase2.toml
+# configs/lab/phase2.toml  — Flavor 1 + Flavor 2
 [env]
-id = "CausalReasoningEnv_2"
-args = {"weights": [0.4, 0.6, 0.0, 0.0]}   # F1 + F3
+id = "CausalReasoningEnv"
+args = {"weights": [0.5, 0.5, 0.0]}
 
-# configs/vf-rl/phase3.toml
+# configs/lab/phase3.toml  — all three flavors
 [env]
-id = "CausalReasoningEnv_2"
-args = {"weights": [0.3, 0.4, 0.3, 0.0]}   # F1 + F3 + F2
-
-# configs/vf-rl/phase4.toml
-[env]
-id = "CausalReasoningEnv_2"
-args = {"weights": [0.25, 0.3, 0.25, 0.2]} # all four flavors
+id = "CausalReasoningEnv"
+args = {"weights": [0.4, 0.4, 0.2]}
 ```
 
-`load_environment` receives the weights and builds the EnvGroup accordingly:
+Weight index order: `[w_F1, w_F2, w_F3]`.
+
+`load_environment` receives the weights and builds the EnvGroup:
 
 ```python
 def load_environment(weights=None):
     if weights is None:
-        weights = [1.0, 0.0, 0.0, 0.0]  # default: F1 only
+        weights = [1.0, 0.0, 0.0]  # default: F1 only
 
-    all_envs = [load_flavor1, load_flavor3, load_flavor2, load_flavor4]
-    # order: [F1, F3, F2, F4] — matches weight index
+    all_envs = [load_flavor1, load_flavor2, load_flavor3]
 
     active = [(fn(), w) for fn, w in zip(all_envs, weights) if w > 0]
     return vf.EnvGroup([e for e, _ in active], weights=[w for _, w in active])
 ```
 
-To advance the curriculum: monitor per-flavor reward in training logs, decide manually
-when the current phase has plateaued, then resume from checkpoint with the next config:
+To advance the curriculum: monitor per-flavor reward in training logs. When the current phase has plateaued, resume from checkpoint with the next config:
 
 ```bash
-prime train --config configs/vf-rl/phase1.toml
+prime train --config configs/lab/phase1.toml
 # ... monitor F1 reward, wait for plateau ...
-prime train --config configs/vf-rl/phase2.toml --resume checkpoints/step_XXXX/
+prime train --config configs/lab/phase2.toml --resume checkpoints/step_XXXX/
+# ... monitor F1 + F2 reward ...
+prime train --config configs/lab/phase3.toml --resume checkpoints/step_YYYY/
 ```
 
-**Tool scaffolding → removal:** Early training, `find_adjustment_sets` tool available. After convergence on Flavor 1, remove tool (or penalize its use), forcing internalized graph reasoning.
-
-**Process reward option:** Use a lightweight LLM judge (e.g., `gpt-4.1-mini` via `vf.JudgeRubric`) to score reasoning quality: "Did the model correctly identify the backdoor paths? Did it correctly apply the do() operator?" Weight 0.1.
+**Tool scaffolding → removal:** During Phase 1, `find_adjustment_sets` is available. After the model converges on Flavor 1 graph reasoning, remove the tool or penalize its use to force internalized graph structure analysis before proceeding to Phase 2.
 
 ---
 
@@ -611,56 +683,95 @@ prime train --config configs/vf-rl/phase2.toml --resume checkpoints/step_XXXX/
 
 ### Target file structure
 
-✅ [2026-02-27] File structure created:
+Current state and what needs to be built:
 
 ```
 environments/
-  CausalReasoningEnv/                    ← new main package
-    pyproject.toml                       ✅ created
-    CausalReasoningEnv.py                ← load_environment() → EnvGroup  ✅ created
-    flavor1.py                           ← Flavor1Env + load_flavor1()  ✅ created (migrated from CausalReasoningEnv_1)
-    flavor2.py                           ← Flavor2Env + load_flavor2()  ✅ stub created
-    flavor3.py                           ← Flavor3Env + load_flavor3()  ✅ stub created
-    flavor4.py                           ← Flavor4Env + load_flavor4()  ✅ stub created
+  CausalReasoningEnv/
+    pyproject.toml                       ✅ exists
+    CausalReasoningEnv.py                ✅ exists — needs weights updated to [F1, F2, F3]
+    prompts.py                           ✅ exists — shared CAUSAL_KNOWLEDGE + build_system_prompt
+    flavor1.py                           ✅ fully implemented
+    flavor2.py                           ← REPLACE stub with full Flavor 2 implementation
+    flavor3.py                           ← REPLACE stub with Flavor 3 implementation
+                                           (previously flavor4.py content)
+    flavor4.py                           ← DELETE (merged into new flavor2.py)
     data_generation/
-      flavor1_gen.py                     ✅ created (generation logic ported from original)
-      flavor2_gen.py                     ✅ stub created
-      flavor3_gen.py                     ✅ stub created
-      flavor4_gen.py                     ✅ stub created
+      flavor1_gen.py                     ✅ fully implemented
+      flavor2_gen.py                     ← REPLACE stub with full Flavor 2 generation
+      flavor3_gen.py                     ← REPLACE stub with Flavor 3 generation
+                                           (previously flavor4_gen.py content)
+      flavor4_gen.py                     ← DELETE (merged into new flavor2_gen.py)
+      generate_datasets_flavor1.py       ✅ exists
+      profile_datasets_flavor1.py        ✅ exists
+      upload_flavor1_datasets.py         ✅ exists
 ```
 
-### Migration plan for CausalReasoningFlavor1
+### Completed work (Flavor 1)
 
-- ✅ [2026-02-27] Port `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` → `data_generation/flavor1_gen.py`
-- ✅ [2026-02-27] Port `Flavor1Env` class + `load_flavor1()` → `flavor1.py`
-- ✅ [2026-02-27] Port `_render_dag_b64`, `format_problem`, `valid_adjustment_set`, `parse_answer` → inline in `flavor1.py`
-- ✅ [2026-02-27] Delete `environments/CausalReasoningEnv_1/`
-- ✅ [2026-02-28] Refactor flavor1 prompts; add shared `prompts.py` module (`CAUSAL_KNOWLEDGE`, `build_system_prompt`)
-- ✅ [2026-02-28] Implement 6-bucket stratified generation in `flavor1_gen.py` (including frontdoor and not_identifiable types)
-- ✅ [2026-02-28] Implement reward functions: `format_compliance`, `status_check`, `answer_correctness` covering all identifiability cases
-- ✅ [2026-03-01] Generate train (250) + eval (100) datasets; upload to HuggingFace: `irfanjamil/causal-reasoning-flavor1`
-- ✅ [2026-03-01] `load_flavor1()` simplified — no parameters; loads directly from HuggingFace via `load_dataset()`
-- [ ] Verify `flavor1.py` produces correct reward behavior (run `prime eval` spot-check)
+- ✅ [2026-02-27] Migrated from `CausalReasoningEnv_1`; repo and package renamed
+- ✅ [2026-02-28] Shared `prompts.py` module: `CAUSAL_KNOWLEDGE`, `build_system_prompt`
+- ✅ [2026-02-28] 6-bucket stratified generation in `flavor1_gen.py` (including frontdoor and not_identifiable types)
+- ✅ [2026-02-28] Reward functions: `format_compliance`, `status_check`, `answer_quality`, `answer_correctness`
+- ✅ [2026-03-01] Datasets generated and uploaded to HuggingFace: `irfanjamil/causal-reasoning-flavor1` (250 train / 100 eval)
+- ✅ [2026-03-01] `load_flavor1()` loads directly from HuggingFace via `load_dataset()`
+- [ ] Verify `flavor1.py` reward behavior (run `prime eval` spot-check)
 
-### New files to create
-- ✅ [2026-02-27] `environments/CausalReasoningEnv/CausalReasoningEnv.py`
-- ✅ [2026-02-27] `environments/CausalReasoningEnv/pyproject.toml`
-- ✅ [2026-02-27] `environments/CausalReasoningEnv/flavor1.py` through `flavor4.py`
-- ✅ [2026-02-27] `environments/CausalReasoningEnv/data_generation/flavor1_gen.py` through `flavor4_gen.py`
-- ✅ [2026-02-27] `configs/lab/phase1.toml` — F1 only (`weights: [1.0, 0.0, 0.0, 0.0]`)
-- ✅ [2026-02-27] `configs/lab/phase2.toml` — F1 + F3 (`weights: [0.4, 0.6, 0.0, 0.0]`)
-- ✅ [2026-02-27] `configs/lab/phase3.toml` — F1 + F3 + F2 (`weights: [0.3, 0.4, 0.3, 0.0]`)
-- ✅ [2026-02-27] `configs/lab/phase4.toml` — all flavors (`weights: [0.25, 0.3, 0.25, 0.2]`)
-- Note: configs placed in `configs/lab/` (not `configs/vf-rl/`) — update path references if needed
+### Work remaining
 
-### New dependencies needed
-- ✅ `scipy`, `pandas`, `statsmodels` — already added to `pyproject.toml`
-- [ ] `sympy` — optional symbolic SCM manipulation (Flavor 3 linear case)
+**Cleanup (do first):**
+- [ ] Delete `flavor4.py` (old Flavor 4 stub — superseded by new Flavor 3)
+- [ ] Delete `data_generation/flavor4_gen.py` (same reason)
+- [ ] Delete `flavor3.py` (old Flavor 3 stub — merged into new Flavor 2)
+- [ ] Delete `data_generation/flavor3_gen.py` (same reason)
+- [ ] Update `CausalReasoningEnv.py`: change weights from 4-element to 3-element list;
+      update `all_envs` to `[load_flavor1, load_flavor2, load_flavor3]`
+- [ ] Update `configs/lab/phase1.toml`: weights `[1.0, 0.0, 0.0]`
+- [ ] Update `configs/lab/phase2.toml`: weights `[0.5, 0.5, 0.0]` (F1 + F2)
+- [ ] Update `configs/lab/phase3.toml`: weights `[0.4, 0.4, 0.2]` (all three)
+- [ ] Delete `configs/lab/phase4.toml` (no longer needed)
+
+**Flavor 2 implementation — `flavor2_gen.py` and `flavor2.py`:**
+See the full Flavor 2 spec in Part I above (Sub-case A and Sub-case B sections).
+
+`flavor2_gen.py` must implement:
+- `generate_flavor2_problems(n_train, n_eval, seed)` → `(list[dict], list[dict])`
+  - Sub-case A (~20%): linear SCM generator → problem_type in {standard, mediated, canceling, no_path}
+  - Sub-case B (~80%): discrete CPT SCM generator → problem_type in {backdoor_standard,
+    backdoor_empty, frontdoor, not_identifiable, missing_support}
+  - Each problem dict must include the fields listed in the SCM generation steps above
+- `build_dataset(problems, format_fn)` → HuggingFace `Dataset`
+
+`flavor2.py` must implement:
+- `format_problem_2a(...)` — renders Sub-case A problem (structural equations + DAG)
+- `format_problem_2b(...)` — renders Sub-case B problem (DAG + data snippet)
+- `parse_answer_2(content)` — parses `<answer>ATE=...` or `<answer>status=..., ATE=..., CATE=...`
+- Reward functions: `format_compliance`, `status_check`, `answer_quality`
+  (see Reward Rubric section above for weight and scoring details)
+- `load_flavor2()` → `vf.ToolEnv` with the tools listed in Part III
+
+**Flavor 3 implementation — `flavor3_gen.py` and `flavor3.py`:**
+See the Flavor 3 spec in Part I above.
+
+`flavor3_gen.py` must implement:
+- `generate_flavor3_problems(n_train, n_eval, seed)` → `(list[dict], list[dict])`
+- `build_dataset(problems, format_fn)` → HuggingFace `Dataset`
+
+`flavor3.py` must implement:
+- `format_problem_3(...)` — renders problem (DAG + data)
+- `parse_answer_3(content)` — parses structural coefficient answer
+- Reward functions: `format_compliance`, `answer_quality`
+- `load_flavor3()` → `vf.ToolEnv`
+
+### Dependencies
+- ✅ `scipy`, `pandas`, `statsmodels` — in `pyproject.toml`
+- ✅ `networkx`, `datasets` — in `pyproject.toml`
 
 ### Verification plan
-- [ ] `python -c "from CausalReasoningEnv import load_environment; env = load_environment(); print(env)"` — confirms environment loads
-- [ ] `prime eval run CausalReasoningEnv -a '{"weights": [1.0, 0.0, 0.0, 0.0]}' -n 10 -m openai/gpt-4.1-mini` — spot-check F1 reward matches original
-- [ ] `prime eval run CausalReasoningEnv -n 10 -m openai/gpt-4.1-mini` — spot-check reward distributions per flavor (all phases)
-- [ ] Manually inspect 5 problems per flavor: verify ground truth ATEs match simulation, verify prompts are parseable
-- [ ] Check reward function edge cases: empty adjustment set, unparseable answers, zero-variance outcomes
+- [ ] `python -c "from CausalReasoningEnv import load_environment; env = load_environment(); print(env)"` — confirms F1-only default loads
+- [ ] `prime eval run CausalReasoningEnv -a '{"weights": [1.0, 0.0, 0.0]}' -n 10 -m openai/gpt-4.1-mini` — spot-check F1 reward
+- [ ] `prime eval run CausalReasoningEnv -a '{"weights": [0.0, 1.0, 0.0]}' -n 20 -m openai/gpt-4.1-mini` — spot-check F2 reward
+- [ ] Manually inspect 5 Sub-case A problems: verify ATE matches path-tracing by hand
+- [ ] Manually inspect 5 Sub-case B problems per type: verify true_ATE matches CPT enumeration
+- [ ] Check reward edge cases: ATE=0, not_estimable, frontdoor formula, missing strata
 - [ ] Confirm `vf.EnvGroup` routes to correct sub-environment and aggregates metrics correctly
