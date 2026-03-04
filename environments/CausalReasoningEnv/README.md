@@ -52,8 +52,8 @@ prime env install CausalReasoningEnv -p ./environments
 **Reward rubric:**
 - `format_compliance` (weight 0.10) — one parseable `<answer>` block
 - `status_check` (weight 0.00) — correct identification strategy declared (monitoring only)
-- `answer_quality` (weight 0.90) — graded: exact match on minimal set = 1.0; valid but non-minimal = scaled partial; wrong = 0.0
-- `answer_correctness` (weight 0.00) — binary exact-match metric (monitoring only)
+- `answer_quality` (weight 0.0) — metric only: exact match on minimal set = 1.0; valid but non-minimal = scaled partial; wrong = 0.0
+- `answer_correctness` (weight 0.90) — 1.0 iff the answer exactly matches the golden answer, else 0.0
 
 **Environment type:** `vf.SingleTurnEnv`
 
