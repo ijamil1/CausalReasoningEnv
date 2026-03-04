@@ -332,7 +332,7 @@ def load_flavor1() -> vf.SingleTurnEnv:
 
     rubric = vf.Rubric(
         funcs=[format_compliance, status_check, answer_quality, answer_correctness],
-        weights=[0.1, 0.0, 0.9, 0.0],
+        weights=[0.1, 0.0, 0.0, 0.9],
     )
 
     return vf.SingleTurnEnv(
