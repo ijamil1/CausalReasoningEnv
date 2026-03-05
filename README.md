@@ -2,37 +2,42 @@
 
 A workspace for building causal reasoning RL training environments using Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
 
-The goal is a **three-flavor causal reasoning benchmark** paired with a multi-turn tool-use training environment that trains models toward it. See [`BENCHMARK_DESIGN.md`](BENCHMARK_DESIGN.md) for the full design rationale, data generation specs, answer formats, and reward rubrics.
+The environment trains models to identify causal adjustment strategies and compute Average Treatment Effects (ATE) via probability query tools over discrete CPT-based DAGs. See [`BENCHMARK_DESIGN.md`](BENCHMARK_DESIGN.md) for the full design rationale.
 
 ## Environment
 
-→ **[`environments/CausalReasoningEnv/`](environments/CausalReasoningEnv/)** — the main package. See its [README](environments/CausalReasoningEnv/README.md) for what's implemented, how to install, and how to run eval.
+→ **[`environments/CausalReasoningEnv/`](environments/CausalReasoningEnv/)** — the main package. See its [README](environments/CausalReasoningEnv/README.md) for design details, install instructions, and eval commands.
+
+### Two-Phase Design
+
+**Phase 1 (declaration):** Model reasons about the DAG and writes `<set>…</set>` to declare its identification set — scored independently of computation.
+
+**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>ATE=…</answer>` or `<answer>not_identifiable</answer>` to end the episode.
+
+### Reward (weights: 0.05 / 0.30 / 0.15 / 0.50)
+
+`format_compliance` / `set_valid` / `minimality` / `ate_accuracy`
 
 ## Repository Structure
 
 ```
 environments/
-  CausalReasoningEnv/         # Main package — load_environment(weights) → vf.EnvGroup
-    CausalReasoningEnv.py     #   Entry point; routes weights to active flavor sub-envs
-    flavor1.py                #   Flavor 1: adjustment set identification (fully implemented)
-    flavor2.py                #   Flavor 2: ATE estimation — linear SCM path-tracing (Sub-case A)
-                              #             + nonparametric ATE from discrete data (Sub-case B)
-    flavor3.py                #   Flavor 3: estimate structural equation from data
-    prompts.py                #   Shared causal knowledge block + system prompt builder
+  CausalReasoningEnv/              # Main package — load_environment() → CausalATEEnv
+    CausalReasoningEnv.py          #   Entry point
+    env.py                         #   CausalATEEnv — tools, rubric, two-phase stop logic
+    prompts.py                     #   SYSTEM_PROMPT — declaration format, tool docs
     data_generation/
-      flavor1_gen.py          #   DAG generation + dataset builder for Flavor 1
-      flavor2_gen.py          #   Data generation for Flavor 2 (Sub-cases A and B)
-      flavor3_gen.py          #   Data generation for Flavor 3
+      gen.py                       #   DAG generation, problem sampling, dataset builder
+      generate_datasets.py         #   CLI: regenerate and upload datasets
     pyproject.toml
     README.md
 
 configs/
   lab/
-    phase1.toml               # Curriculum phase 1: Flavor 1 only
-    phase2.toml               # Curriculum phase 2: Flavors 1 + 2
-    phase3.toml               # Curriculum phase 3: all three flavors
+    phase1.toml                    # Training config: CausalReasoningEnv
 
-BENCHMARK_DESIGN.md           # Full benchmark and training environment design doc
+BENCHMARK_DESIGN.md                # Full benchmark design doc
+IMPLEMENTATION_PLAN.md             # Detailed implementation spec (declaration + tool use design)
 ```
 
 ## Setup

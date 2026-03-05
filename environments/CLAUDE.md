@@ -8,40 +8,42 @@ This repo builds a **four-flavor causal reasoning benchmark** and paired RL trai
 
 | Dir | Status | Description |
 |-----|--------|-------------|
-| `CausalReasoningEnv/` | ✅ Scaffolded | Single package: `load_environment(weights)` returns a `vf.EnvGroup` over up to 4 flavors. Flavor 1 fully implemented; Flavors 2–4 are stubs. |
+| `CausalReasoningEnv/` | ✅ Implemented | Single package: `load_environment()` returns a `CausalATEEnv`. Two-phase multi-turn design: declaration turn + tool use + answer. |
 
-### Four Benchmark Flavors
+### Benchmark Design
 
-Weight index order in `load_environment(weights=[w0, w1, w2, w3])`:
+The environment implements a two-phase rollout over CPT-based DAGs:
 
-| Index | Flavor | Status | Task |
-|-------|--------|--------|------|
-| 0 | **Flavor 1 — Causal Identification** | ✅ Implemented | Given DAG + X, Y with observed/latent nodes: determine identifiability status (backdoor, frontdoor, empty, not-identifiable) and return the minimal adjustment set, frontdoor mediator, or flag non-identifiability. |
-| 1 | **Flavor 3 — Analytical ATE** | 🚧 Stub | Given DAG + fully specified SCM: compute exact E[Y\|do(X=x)] analytically. |
-| 2 | **Flavor 2 — ATE from Data** | 🚧 Stub | Given DAG + observational CSV: estimate ATE/CATE by stratified counting (tool use). |
-| 3 | **Flavor 4 — Estimate SCM** | 🚧 Stub | Given DAG + data: estimate structural equations by regressing each node on its causal parents. |
+**Phase 1 (declaration):** Model reasons about the DAG and writes `<set>…</set>` to declare its identification set — scored independently of computation.
 
-Note: weight index order is [F1, F3, F2, F4] — matching curriculum progression (simpler flavors first).
+**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 5 tool calls (optimal max is 2).
+
+### Problem Types
+
+| Type | Fraction | Description |
+|------|----------|-------------|
+| `backdoor_standard` | ~35% | Non-empty minimal adjustment set; verified no frontdoor ambiguity |
+| `backdoor_empty` | ~20% | Empty adjustment set (X,Y d-separated in backdoor graph) |
+| `frontdoor` | ~20% | Latent confounder; multi-node mediator set via `minimum_node_cut`; verified no backdoor |
+| `not_identifiable` | ~25% | Direct X→Y + latent confounder; neither method works |
+
+Each problem has **exactly one valid identification method** by construction.
 
 ### Key Functions in CausalReasoningEnv/
 
-When implementing Flavors 2–4, reuse these from [flavor1.py](CausalReasoningEnv/flavor1.py) and [data_generation/flavor1_gen.py](CausalReasoningEnv/data_generation/flavor1_gen.py):
-- `_make_dag`, `_try_sample_problem`, `generate_stratified_dag_problems` — DAG generation (in `flavor1_gen.py`)
-- `format_problem` — DAG text rendering (in `flavor1.py`)
-- `valid_adjustment_set`, `parse_answer` — reward function primitives (in `flavor1.py`)
+Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](CausalReasoningEnv/data_generation/gen.py):
+- `_make_dag`, `_try_sample_backdoor`, `_try_sample_frontdoor` — DAG generation (in `gen.py`)
+- `_check_frontdoor_conditions` — frontdoor condition checker; defined in both `gen.py` and `env.py`
+- `format_problem` — DAG text rendering (in `gen.py`)
+- `_parse_set`, `_reconstruct_graph` — reward function helpers (in `env.py`)
 
-### Reward Rubric Conventions (all flavors)
+### Reward Rubric
 
-**Flavor 1 (implemented)** uses 3 layers:
-- **Layer 1 — Format compliance:** `weight=0.10` (`format_compliance`) — parseable `<answer>` block
-- **Layer 2 — Status check:** `weight=0.10` (`status_check`) — correct identification method declared (backdoor / frontdoor / not_identifiable)
-- **Layer 3 — Answer correctness:** `weight=0.80` (`answer_correctness`) — exact match against any minimal set; 0.5 for valid but non-minimal; 0.0 for wrong method or invalid
-
-**Flavors 2–4 (planned)** will use 4 layers:
-- **Layer 1 — Format compliance:** `weight=0.05`
-- **Layer 2 — Validity / process:** `weight=0.15` (valid adjustment set, correct parent selection, etc.)
-- **Layer 3 — Answer correctness:** `weight=0.80` (flavor-specific; see BENCHMARK_DESIGN.md)
-- **Layer 4 — Monitoring metrics:** `weight=0` (tool usage, num_tool_calls, intermediate correctness)
+4-component rubric (weights: 0.05 / 0.30 / 0.15 / 0.50):
+- **`format_compliance`** — valid `<answer>` block present
+- **`set_valid`** — declared `<set>` satisfies the identification criterion for this problem type
+- **`minimality`** — graded: 1.0 if minimal size, k/|declared| if valid superset
+- **`ate_accuracy`** — final answer within ±0.01 of true ATE (or correct not_identifiable)
 
 ### Tools for CausalReasoningEnv (Flavors 2–4)
 

@@ -12,8 +12,7 @@ hard_threshold = 0.025
 max_tokens = 10000
 
 [[env]]
-id = "irfanjamil/CausalReasoningEnv@0.1.1"
-args = {weights = [1.0, 0.0, 0.0]}   # Flavor 1 only
+id = "irfanjamil/CausalReasoningEnv@0.2.0"
 
 [eval]
 interval = 250                    # Evaluate every 250 steps

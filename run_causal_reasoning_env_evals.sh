@@ -15,7 +15,7 @@ for model in "${models[@]}"; do
     echo "Skipping $model (already has eval results for $short_name)"
   else
     echo "Running eval with model: $model"
-    prime eval run irfanjamil/CausalReasoningEnv@0.1.1 -n 100 -r 3 -m "$model"
+    prime eval run irfanjamil/CausalReasoningEnv@0.1.3 -n 100 -r 3 -m "$model"
   fi
   echo ""
 done

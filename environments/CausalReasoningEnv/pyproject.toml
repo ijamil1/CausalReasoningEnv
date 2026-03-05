@@ -1,16 +1,13 @@
 [project]
 name = "CausalReasoningEnv"
-description = "Multi-task causal reasoning benchmark and training environment: adjustment set identification, ATE estimation, SCM derivation, and structural equation fitting."
+description = "Causal ATE estimation benchmark: identify and compute average treatment effects via probability query tools over discrete CPT-based DAGs."
 tags = ["reasoning", "causal-reasoning", "graph-reasoning", "multi-turn", "train", "eval"]
-version = "0.1.3"
+version = "0.2.0"
 requires-python = ">=3.12"
 dependencies = [
     "verifiers>=0.1.9.post3",
     "networkx>=3.0",
     "datasets",
-    "scipy",
-    "pandas",
-    "statsmodels",
 ]
 
 [build-system]
@@ -20,10 +17,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build]
 include = [
     "CausalReasoningEnv.py",
-    "flavor1.py",
-    "flavor2.py",
-    "flavor3.py",
-    "flavor4.py",
+    "env.py",
     "prompts.py",
     "pyproject.toml",
 ]
