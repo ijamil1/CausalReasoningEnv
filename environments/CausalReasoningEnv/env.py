@@ -16,6 +16,8 @@ from itertools import product as itertools_product
 
 import networkx as nx
 import verifiers as vf
+from datasets import load_dataset
+from networkx.algorithms.d_separation import is_d_separator
 
 from prompts import SYSTEM_PROMPT
 
@@ -192,7 +194,7 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
     G_xbar = G.copy()
     G_xbar.remove_edges_from(list(G.out_edges(X)))
     try:
-        if not nx.d_separated(G_xbar, {X}, M, set()):
+        if not is_d_separator(G_xbar, {X}, M, set()):
             return False
     except Exception:
         return False
@@ -202,7 +204,7 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
     for m in M:
         G_mbar.remove_edges_from(list(G.out_edges(m)))
     try:
-        if not nx.d_separated(G_mbar, M, {Y}, {X}):
+        if not is_d_separator(G_mbar, M, {Y}, {X}):
             return False
     except Exception:
         return False
@@ -254,7 +256,7 @@ async def set_valid(completion, info, **kwargs) -> float:
         G_back = G.copy()
         G_back.remove_edges_from(list(G.out_edges(X)))
         try:
-            return 1.0 if nx.d_separated(G_back, {X}, {Y}, Z) else 0.0
+            return 1.0 if is_d_separator(G_back, {X}, {Y}, Z) else 0.0
         except Exception:
             return 0.0
 
@@ -452,13 +454,11 @@ class CausalATEEnv(vf.StatefulToolEnv):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def load_environment(dataset: vf.Dataset | None = None, **kwargs) -> CausalATEEnv:
+def load_environment(**kwargs) -> CausalATEEnv:
     """Instantiate CausalATEEnv from a pre-built HuggingFace Dataset.
 
-    If dataset is None, loads from HuggingFace Hub (irfanjamil/causal-reasoning-ate).
+    Load from HuggingFace Hub (irfanjamil/causal-reasoning-ate).
     """
-    if dataset is None:
-        from datasets import load_dataset
-        ds = load_dataset("irfanjamil/causal-reasoning-ate", split="train")
-        dataset = ds
-    return CausalATEEnv(dataset=dataset, **kwargs)
+    train_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="train")
+    eval_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="test")
+    return CausalATEEnv(dataset=train_ds, eval_dataset=eval_ds, **kwargs)
