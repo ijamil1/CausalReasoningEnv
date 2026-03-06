@@ -35,7 +35,7 @@ from itertools import product as itertools_product
 
 import networkx as nx
 from datasets import Dataset
-from networkx.algorithms.d_separation import find_minimal_d_separator
+from networkx.algorithms.d_separation import is_d_separator, find_minimal_d_separator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,43 +68,45 @@ def _add_latent_confounder(G: nx.DiGraph, X: int, Y: int, n: int) -> int:
     return n
 
 
-def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
+def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool | str:
     """Check all three frontdoor conditions for mediator set M.
 
     Condition 1: Y not reachable from X in the subgraph with M removed.
     Condition 2: X d-separated from M in the backdoor graph (X's outgoing edges removed) given empty set.
     Condition 3: M d-separated from Y by {X} in the graph with M's outgoing edges removed.
+
+    Returns True if all conditions pass, or a string naming the failing condition.
     """
     M = set(M)
     if not M:
-        return False
+        return "cond0_empty_M"
 
     # Condition 1: Y not reachable from X without going through M
     G_minus_M = G.subgraph(set(G.nodes()) - M)
     try:
         if nx.has_path(G_minus_M, X, Y):
-            return False
+            return "cond1_X_reaches_Y_without_M"
     except nx.NetworkXError:
-        return False
+        return "cond1_networkx_error"
 
     # Condition 2: X d-separated from M in backdoor graph given ∅
     G_xbar = G.copy()
     G_xbar.remove_edges_from(list(G.out_edges(X)))
     try:
-        if not nx.d_separated(G_xbar, {X}, M, set()):
-            return False
-    except Exception:
-        return False
+        if not is_d_separator(G_xbar, {X}, M, set()):
+            return "cond2_X_not_dsep_from_M"
+    except Exception as e:
+        return f"cond2_exception:{type(e).__name__}:{e}"
 
     # Condition 3: M d-separated from Y by X in graph with M's outgoing edges removed
     G_mbar = G.copy()
     for m in M:
         G_mbar.remove_edges_from(list(G.out_edges(m)))
     try:
-        if not nx.d_separated(G_mbar, M, {Y}, {X}):
-            return False
+        if not is_d_separator(G_mbar, M, {Y}, {X}):
+            return "cond3_M_not_dsep_from_Y"
     except Exception:
-        return False
+        return "cond3_exception"
 
     return True
 
@@ -312,6 +314,8 @@ def _try_sample_backdoor(
         return None
     if min_set & nx.descendants(G, X):  # no descendants of X in adjustment set
         return None
+    if not empty and min_set.issubset(set(G.predecessors(X))):  # reject trivial pa(X) adjustment
+        return None
 
     # Eliminate method ambiguity: verify no valid frontdoor set exists
     if not G.has_edge(X, Y):
@@ -347,34 +351,43 @@ def _try_sample_frontdoor(
     rng: random.Random,
     min_nodes: int,
     max_nodes: int,
-    edge_prob: float,
+    edge_prob: float
 ) -> dict | None:
-    """Sample a frontdoor problem with a multi-node mediator set.
+    """Sample a frontdoor problem.
 
-    Uses minimum_node_cut to find the minimal mediator set M_star. Verifies
-    all three frontdoor conditions and that no valid backdoor adjustment set exists.
+    X and Y are sampled freely (path X→Y exists, no direct X→Y edge, Y is a sink).
+    M_star = minimum node cut of G_desc gives the globally minimal set satisfying
+    condition 1. Edges into M_star from nodes that are not X, not in M_star, and
+    not descendants of X are removed — these are the only edges that can cause
+    conditions 2/3 to fail, and by minimality of M_star they are never on X→Y
+    paths (safe to remove). Frontdoor conditions are then verified as a sanity
+    check. Finally, the absence of a valid backdoor adjustment set is confirmed.
     """
+
     n = rng.randint(min_nodes, max_nodes)
-    G = _make_dag(n, edge_prob, rng)
-    nodes_list = sorted(G.nodes())
+    i = 0
+    proceed_flag = False
+    while i < 50:
+        G = _make_dag(n, edge_prob, rng)
+        nodes_list = sorted(G.nodes())
+        X, Y = rng.sample(nodes_list, 2)
+        if not nx.has_path(G, X, Y):
+            i += 1
+            continue
+        if G.out_degree(Y) > 0:
+            i += 1
+            continue
+        if G.has_edge(X, Y):
+            i += 1
+            continue
+        proceed_flag = True
+        break
+
+    if not proceed_flag:
+        return None
+
     if len(nodes_list) < 4:
         return None
-
-    # Pick X as a source (no parents in original DAG) and Y as a sink (no children)
-    # with a path from X to Y but no direct X→Y edge.
-    sources = [nd for nd in nodes_list if G.in_degree(nd) == 0]
-    sinks = [nd for nd in nodes_list if G.out_degree(nd) == 0]
-    if not sources or not sinks:
-        return None
-
-    X = rng.choice(sources)
-    valid_sinks = [
-        nd for nd in sinks
-        if nd != X and not G.has_edge(X, nd) and nx.has_path(G, X, nd)
-    ]
-    if not valid_sinks:
-        return None
-    Y = rng.choice(valid_sinks)
 
     # Add latent confounder L→X, L→Y
     L = _add_latent_confounder(G, X, Y, n)
@@ -382,36 +395,48 @@ def _try_sample_frontdoor(
     latent_nodes = {L}
     nodes_list = sorted(G.nodes())
 
-    # Build descendant subgraph of X to find mediator set
-    desc = nx.descendants(G, X) | {X, Y}
-    G_desc = G.subgraph(desc).copy()
-
-    # Find minimal mediator set via minimum vertex cut
+    # Build descendant subgraph of X and find the minimum vertex cut (M_star).
+    # M_star is the globally minimal set satisfying frontdoor condition 1.
+    desc_of_X = nx.descendants(G, X)
+    G_desc = G.subgraph(desc_of_X | {X, Y}).copy()
     try:
         M_star = nx.minimum_node_cut(G_desc, X, Y)
-    except Exception:
+    except Exception as e:
         return None
 
     k = len(M_star)
-    if k == 0 or k > 3:
+    if k == 0:
         return None
-
-    # All mediators must be observed
+    if k > 3:
+        return None
     if M_star & latent_nodes:
         return None
 
-    # Verify all three frontdoor conditions for M_star
-    if not _check_frontdoor_conditions(G, X, Y, M_star):
+    # Remove edges into M_star from nodes that are not X, not in M_star, and
+    # not descendants of X. By M_star minimality, such edges are never on any
+    # X→Y path, so condition 1 is preserved. These are the only edges that can
+    # cause conditions 2 or 3 to fail (an external non-descendant parent of
+    # m ∈ M_star would be an ancestor of X or unrelated to X, creating a
+    # backdoor path; a descendant-of-X parent of m cannot violate conditions 2/3
+    # without contradicting M_star minimality).
+    for m in M_star:
+        for parent in list(G.predecessors(m)):
+            if parent != X and parent not in M_star:
+                G.remove_edge(parent, m)
+
+    # Sanity check: frontdoor conditions must hold after the above deletions.
+    _fd_result = _check_frontdoor_conditions(G, X, Y, M_star)
+    if _fd_result is not True:
         return None
 
-    # Verify no valid backdoor adjustment set exists among observed nodes
+    # Verify no valid backdoor adjustment set exists among observed nodes.
     G_bd = _make_backdoor_graph(G, X)
     try:
         Z = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
-    except Exception:
+    except Exception as e:
         return None
     if Z is not None:
-        return None  # backdoor adjustment set exists, resample
+        return None
 
     minimal_set = sorted(M_star)
 
@@ -621,13 +646,24 @@ def generate_problems(
 
     fracs = {
         "backdoor_standard": 0.35,
-        "backdoor_empty": 0.20,
-        "frontdoor": 0.20,
+        "backdoor_empty": 0.15,
+        "frontdoor": 0.25,
         "not_identifiable": 0.25,
     }
 
+    def _problem_key(p: dict) -> tuple:
+        return (
+            p["problem_type"],
+            tuple(tuple(e) for e in p["edges"]),
+            tuple(p["nodes"]),
+            p["X"],
+            p["Y"],
+            tuple(p["observed_nodes"]),
+        )
+
     def _sample_bucket(ptype: str, n_target: int) -> list[dict]:
         problems = []
+        seen = set()
         max_attempts = n_target * 500
         for _ in range(max_attempts):
             if len(problems) >= n_target:
@@ -643,12 +679,16 @@ def generate_problems(
             else:
                 p = None
             if p is not None:
-                problems.append(p)
+                key = _problem_key(p)
+                if key not in seen:
+                    seen.add(key)
+                    problems.append(p)
         return problems
 
     problems = []
     for ptype, frac in fracs.items():
         n_target = max(1, round(n * frac))
         problems.extend(_sample_bucket(ptype, n_target))
+        print('finished generating {} problems'.format(ptype))
     rng.shuffle(problems)
     return problems
