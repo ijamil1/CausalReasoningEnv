@@ -16,7 +16,7 @@ from itertools import product as itertools_product
 
 import networkx as nx
 import verifiers as vf
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from networkx.algorithms.d_separation import is_d_separator
 
 from prompts import SYSTEM_PROMPT
@@ -322,13 +322,14 @@ async def ate_accuracy(completion, info, **kwargs) -> float:
 class CausalATEEnv(vf.StatefulToolEnv):
     """Two-phase environment for ATE estimation via probability query tools."""
 
-    def __init__(self, dataset: vf.Dataset, **kwargs):
+    def __init__(self, dataset: Dataset, eval_dataset: Dataset | None = None, **kwargs):
         rubric = vf.Rubric(
             funcs=[format_compliance, set_valid, minimality, ate_accuracy],
             weights=[0.05, 0.30, 0.15, 0.50],
         )
         super().__init__(
             dataset=dataset,
+            eval_dataset=eval_dataset,
             system_prompt=SYSTEM_PROMPT,
             tools=[],
             rubric=rubric,
