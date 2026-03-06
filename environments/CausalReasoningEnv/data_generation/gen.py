@@ -167,15 +167,16 @@ def _compute_true_ate_exact(
     parents_map: dict,
 ) -> float:
     """Compute true ATE exactly via do-calculus enumeration (no simulation)."""
-    non_x = [nd for nd in topo_order if nd != X]
+    non_xy = [nd for nd in topo_order if nd != X and nd != Y]
 
     def e_y_do_x(x_val: int) -> float:
         ey = 0.0
-        for vals in itertools_product(*[range(n_cats[nd]) for nd in non_x]):
-            config = dict(zip(non_x, vals))
+        for vals in itertools_product(*[range(n_cats[nd]) for nd in non_xy]):
+            config = dict(zip(non_xy, vals))
             config[X] = x_val
+            config[Y] = 1
             prob = 1.0
-            for nd in non_x:
+            for nd in non_xy:
                 pa = parents_map[nd]
                 pa_vals = tuple(config[p] for p in pa)
                 cpt_entry = cpts[nd][pa_vals]
@@ -184,7 +185,10 @@ def _compute_true_ate_exact(
                     prob *= cpt_entry if v == 1 else (1.0 - cpt_entry)
                 else:
                     prob *= cpt_entry[v]
-            ey += prob * config[Y]
+            # Y is always binary; CPT entry IS P(Y=1 | pa(Y))
+            pa_y_vals = tuple(config[p] for p in parents_map[Y])
+            prob *= cpts[Y][pa_y_vals]
+            ey += prob
         return ey
 
     return round(e_y_do_x(1) - e_y_do_x(0), 6)
@@ -440,23 +444,33 @@ def _try_sample_not_identifiable(
 ) -> dict | None:
     """Sample a not_identifiable problem.
 
-    Requires a direct X→Y edge (blocks frontdoor) and a latent confounder
-    L→X, L→Y (blocks backdoor). Verifies find_minimal_d_separator returns None.
+    Requires a latent confounder L→X, L→Y (blocks backdoor). Verifies
+    find_minimal_d_separator returns None (no valid backdoor set) and that no
+    valid frontdoor mediator set exists (checked via the same candidate set
+    used in the backdoor ambiguity guard: direct successors of X that reach Y).
+    A direct X→Y edge implicitly satisfies the frontdoor check (condition 1
+    fails immediately), so no special-casing is needed.
     """
     n = rng.randint(min_nodes, max_nodes)
     G = _make_dag(n, edge_prob, rng)
-
-    # Need a direct X→Y edge (rules out frontdoor criterion)
-    candidates = [(u, v) for u, v in G.edges() if G.out_degree(v) == 0]
-    if not candidates:
+    nodes_list = sorted(G.nodes())
+    if len(nodes_list) < 3:
         return None
 
-    X, Y = rng.choice(candidates)
+    X, Y = rng.sample(nodes_list, 2)
+    if not nx.has_path(G, X, Y):
+        return None
+    if G.out_degree(Y) > 0:
+        return None
+    if nx.has_path(G, Y, X):
+        return None
+
     L = _add_latent_confounder(G, X, Y, n)
     nodes_list = sorted(G.nodes())
     observed_nodes = set(range(n))
     latent_nodes = {L}
 
+    # Verify no valid backdoor adjustment set exists
     G_bd = _make_backdoor_graph(G, X)
     try:
         check = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
@@ -464,6 +478,13 @@ def _try_sample_not_identifiable(
         return None
     if check is not None:
         return None
+
+    # Verify no valid frontdoor mediator set exists
+    # (if direct X→Y edge exists, frontdoor condition 1 already fails)
+    if not G.has_edge(X, Y):
+        M_temp = frozenset(v for v in G.successors(X) if nx.has_path(G, v, Y))
+        if M_temp and _check_frontdoor_conditions(G, X, Y, M_temp):
+            return None
 
     n_cats = {nd: 2 for nd in nodes_list}
     topo_order = list(nx.topological_sort(G))
