@@ -147,11 +147,11 @@ def _parse_answer(messages: list) -> str | None:
 
 
 def _parse_set(messages: list) -> list[int] | None:
-    """Extract declared identification set from first assistant message with <set> tag.
+    """Extract declared identification set from the first assistant message only.
 
     Returns:
         list[int]  — declared node IDs (may be empty for empty identification set)
-        None       — no <set> tag found
+        None       — no <set> tag found in the first assistant message
     """
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -165,7 +165,8 @@ def _parse_set(messages: list) -> list[int] | None:
                     int(x.strip()) for x in inner.split(",")
                     if x.strip().lstrip("-").isdigit()
                 ]
-    return None  # no <set> tag found
+            return None  # first assistant message found but no <set> tag
+    return None  # no assistant messages
 
 
 def _reconstruct_graph(info: dict) -> nx.DiGraph:
@@ -217,19 +218,18 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def format_compliance(completion, **kwargs) -> float:
-    """1.0 if a valid <answer> block is present."""
+async def format_compliance(completion, state) -> float:
+    """0.5 if <set> tag present in first assistant turn, 0.5 if valid <answer> tag present."""
+    score = 0.0
+    if state.get("declared_set") is not None:
+        score += 0.5
     answer = _parse_answer(completion)
-    if answer is None:
-        return 0.0
-    if answer == "not_identifiable":
-        return 1.0
-    if re.match(r"^ATE=[-+]?\d+(\.\d+)?$", answer):
-        return 1.0
-    return 0.0
+    if answer == "not_identifiable" or (answer and re.match(r"^ATE=[-+]?\d+(\.\d+)?$", answer)):
+        score += 0.5
+    return score
 
 
-async def set_valid(completion, info, **kwargs) -> float:
+async def set_valid(info, state) -> float:
     """1.0 if declared set satisfies the identification criterion for this problem type."""
     if isinstance(info, str):
         info = json.loads(info)
@@ -238,7 +238,7 @@ async def set_valid(completion, info, **kwargs) -> float:
     if problem_type == "not_identifiable":
         return 1.0  # no set needed; answer block checked by ate_accuracy
 
-    declared_set = _parse_set(completion)
+    declared_set = state.get("declared_set")
     if declared_set is None:
         return 0.0  # identifiable problem but no <set> tag declared
 
@@ -269,7 +269,7 @@ async def set_valid(completion, info, **kwargs) -> float:
     return 0.0
 
 
-async def minimality(completion, info, **kwargs) -> float:
+async def minimality(info, state) -> float:
     """Graded: 1.0 if declared set is minimal size, k/|declared| if valid superset."""
     if isinstance(info, str):
         info = json.loads(info)
@@ -277,9 +277,9 @@ async def minimality(completion, info, **kwargs) -> float:
     if problem_type == "not_identifiable":
         return 1.0  # full credit; no set to minimize
     # Gate on validity
-    if await set_valid(completion, info, **kwargs) == 0.0:
+    if await set_valid(info, state) == 0.0:
         return 0.0
-    declared_set = _parse_set(completion) or []
+    declared_set = state.get("declared_set") or []
     minimal_set = info.get("minimal_set")
     if minimal_set is None:
         return 1.0
@@ -389,7 +389,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         return args
 
     @vf.stop
-    def end_of_phase(self, messages: vf.Messages, state: vf.State, **kwargs) -> bool:
+    def end_of_phase(self, messages: vf.Messages) -> bool:
         """Stop conditions for the two-phase rollout.
 
         Turn 1 (declaration): stop only if <answer> is present.
@@ -423,13 +423,32 @@ class CausalATEEnv(vf.StatefulToolEnv):
         has_tool_call = bool(last_assistant and last_assistant.get("tool_calls"))
 
         if not has_tool_call:
+            assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
+            if assistant_turn == 1:
+                declared_set = _parse_set(messages)
+                state["declared_set"] = declared_set
+                if declared_set is None:
+                    # No <set> tag in declaration — terminate rollout immediately
+                    termination = [{"role": "user", "content": "Rollout terminated: declaration turn must include a <set> tag."}]
+                    state["final_env_response"] = termination
+                    return termination
+                # Declaration phase complete — prompt model into tool use / answer phase
+                return [{"role": "user", "content": "Now use the available tools to compute the ATE, then provide your final answer in <answer>ATE=...</answer> or <answer>not_identifiable</answer>."}]
             return []
 
         tool_calls_used = state.get("tool_calls_used", 0)
 
         if tool_calls_used >= MAX_TOOL_CALLS:
-            # Model is still calling tools after limit — return error
-            return [{"role": "tool", "content": "Error: tool call limit reached. Provide your answer in <answer> tags."}]
+            # Must respond to each pending tool call with a matching tool message
+            tool_calls = last_assistant.get("tool_calls", [])
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": "Tool call limit reached. Provide your final answer in <answer> tags now.",
+                }
+                for tc in tool_calls
+            ]
 
         # Execute the tool via parent class
         result_messages = await super().env_response(messages, state, **kwargs)

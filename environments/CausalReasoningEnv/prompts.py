@@ -47,7 +47,7 @@ Turn 1 — Declaration:
     <set>{}</set>       ← empty identification set (no confounding on X→Y)
     <set></set>         ← ATE is not identifiable from observational data
 
-  If the ATE is not identifiable, you may write your final answer immediately:
+  If the ATE is not identifiable, you may also write your final answer immediately:
     <set></set><answer>not_identifiable</answer>
   Including <answer> tags ends the episode immediately.
 
@@ -78,7 +78,7 @@ Non-empty identification set M = {node1, node2} — mediator-style formula:
   Derive P(M|X) = P(X,M) / P(X) and P(X) = Σ_m P(X,M) from the marginal table.
 
 Rules:
-  • Write the <set> tag only in Turn 1, before any tool calls.
-  • Write the <answer> tag only once, in the final answer turn.
+  • Write the <set> tag only in Turn 1, before any tool calls. The <set> tag MUST be present in your first response.
+  • Write the <answer> tag only once, in the final answer turn. This can be in Turn 1 if you beleive the ATE is not identifiable.
   • Do not query latent nodes — they will return an error.
 """

@@ -2,7 +2,7 @@
 
 ## Project Context: Causal Reasoning Benchmark
 
-This repo builds a **four-flavor causal reasoning benchmark** and paired RL training environment. Read [BENCHMARK_DESIGN.md](../BENCHMARK_DESIGN.md) for full design rationale before modifying any environment.
+This repo builds a **causal reasoning benchmark** and paired RL training environment. Read [BENCHMARK_DESIGN.md](../BENCHMARK_DESIGN.md) for full design rationale before modifying any environment.
 
 ### Environments
 
@@ -45,45 +45,29 @@ Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](Caus
 - **`minimality`** — graded: 1.0 if minimal size, k/|declared| if valid superset
 - **`ate_accuracy`** — final answer within ±0.01 of true ATE (or correct not_identifiable)
 
-### Tools for CausalReasoningEnv (Flavors 2–4)
+### Tools for CausalReasoningEnv
 
-Five tools are specified in BENCHMARK_DESIGN.md; implement in `CausalReasoningEnv.py` or per-flavor files:
-- `check_d_separation(edges, X, Y, Z)` — available in both training and eval
-- `find_adjustment_sets(edges, X, Y)` — **training only**; remove or penalize in eval (gives away the answer)
-- `get_descendants(edges, node)` — available in both
-- `run_python(code)` — Python REPL for Flavors 2 and 4; backed by `vf.PythonEnv`
-- `load_data(format)` — loads observational CSV for Flavors 2 and 4
+Two probability query tools are exposed to the model via `StatefulToolEnv`. Per-rollout CPT state is injected via `update_tool_args` (hidden from the model schema):
+- `marginal(variables)` — returns the full joint PMF P(V1, V2, ...) for given observed variables
+- `conditional(query, given)` — returns the full conditional PMF P(query | given) for all strata
 
 ### Data Generation Notes
 
-- **DAG structure:** Random DAGs with stratification across 6 problem types
-- **Flavor 1:** 6 stratified problem types (identifiable_standard ~20%, identifiable_ancestor ~15%, identifiable_collider ~20%, identifiable_frontdoor ~10%, empty ~15%, not_identifiable ~20%). All minimal adjustment sets enumerated at generation time; stored as `minimal_adjustment_sets: list[list[int]]` in `info`. Frontdoor mediator stored as `mediator_node`. Datasets hosted on HuggingFace: `irfanjamil/causal-reasoning-flavor1` (250 train / 100 test splits).
-- **Flavors 2/4:** Nonlinear SCM, discrete variables, N=2000 rows; true ATE via exact enumeration
-- **Flavor 3:** 75% linear SCM, 25% nonlinear (tanh/quadratic); true ATE via 1M-sample simulation
-
-### Training Curriculum
-
-`CausalReasoningEnv` supports a 4-phase curriculum via `weights` arg. Configs live in `configs/lab/`:
-
-| Config | Weights [F1, F3, F2, F4] | Active Flavors |
-|--------|--------------------------|----------------|
-| `configs/lab/phase1.toml` | `[1.0, 0.0, 0.0, 0.0]` | F1 only — graph reasoning warm-up |
-| `configs/lab/phase2.toml` | `[0.4, 0.6, 0.0, 0.0]` | F1 + F3 — add do() operator |
-| `configs/lab/phase3.toml` | `[0.3, 0.4, 0.3, 0.0]` | F1 + F3 + F2 — add data/tool use |
-| `configs/lab/phase4.toml` | `[0.25, 0.3, 0.25, 0.2]` | All four flavors |
-
-Phase out `find_adjustment_sets` tool after Phase 1 convergence to force internalized graph reasoning.
+- **DAG structure:** Random DAGs stratified across 4 problem types (see Problem Types table above)
+- All CPTs, domains, topo order, parents map, and latent nodes serialized into `info` at generation time; true ATE computed via exact enumeration
+- Dataset hosted on HuggingFace: `irfanjamil/causal-reasoning-ate` (train / eval splits)
+- Data generation code in [data_generation/gen.py](CausalReasoningEnv/data_generation/gen.py)
 
 ### Dependencies
 
-Current `pyproject.toml` includes `networkx` (Flavor 1). Add for Flavors 2–4: `scipy`, `pandas`, `statsmodels`, and optionally `sympy` for symbolic SCM manipulation in Flavor 3.
+Current `pyproject.toml` includes `networkx` (for DAG graph operations and d-separation checks).
 
 ### Self-Maintenance Rule
 
-When you detect a large design change or directional shift — e.g. a new benchmark flavor is added or removed, the reward rubric structure changes, a new environment is scaffolded, the tool set changes, or the training curriculum is revised — **proactively update the following files without being asked**:
+When you detect a large design change or directional shift — e.g. the reward rubric structure changes, a new environment is scaffolded, the tool set changes, or the problem types change — **proactively update the following files without being asked**:
 
-1. **`environments/CLAUDE.md`** (this file) — update the flavor table, reuse list, reward conventions, tool list, data generation notes, or curriculum as needed.
-2. **`README.md`** — update the environment table, flavor table, or repo structure section.
+1. **`environments/CLAUDE.md`** (this file) — update the reuse list, reward conventions, tool list, data generation notes, or problem types as needed.
+2. **`README.md`** — update the environment table or repo structure section.
 
 Keep updates focused and minimal: only change what is actually stale. After updating, briefly note in your response what you changed and why.
 
@@ -95,7 +79,7 @@ Keep updates focused and minimal: only change what is actually stale. After upda
 
 <!-- Generated for repository development workflows. Do not edit directly. -->
 
-This file mirrors the "Environments" documentation page.
+This file mirrors the "Environments" documentation page. It is generalized information and not specific to any specific environment.
 
 ---
 
