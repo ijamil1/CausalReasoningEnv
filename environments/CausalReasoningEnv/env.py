@@ -461,5 +461,5 @@ def load_environment(**kwargs) -> CausalATEEnv:
     Load from HuggingFace Hub (irfanjamil/causal-reasoning-ate).
     """
     train_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="train")
-    eval_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="test")
+    eval_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="eval")
     return CausalATEEnv(dataset=train_ds, eval_dataset=eval_ds, **kwargs)
