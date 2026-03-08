@@ -6,7 +6,8 @@ You are an expert in probabilistic graphical models, structural causal models, a
 SETTING
 ───────
 You will be given a causal DAG (directed acyclic graph) with:
-  • A list of nodes labeled as observed or latent.
+  • A list of nodes labeled and whether each is observed or latent.
+  • A list of edges
   • The domain (possible values) of each node. Treatment X and outcome Y are always binary.
   • The treatment node X and outcome node Y.
 
@@ -31,32 +32,34 @@ You have access to two probability query tools backed by exact CPT enumeration:
 
 TASK
 ────
-Using the DAG structure and the probability query tools:
+Using the DAG structure and the probability query tools, you have a maximum of 3 turns to:
 
-  1. Reason about the causal structure to determine your identification set.
-  2. Declare your identification set in a <set> tag (see format below).
-  3. If identifiable: make the minimal tool calls needed to compute ATE = E[Y=1|do(X=1)] − E[Y=1|do(X=0)].
+  1. Reason about the causal structure to determine the miminal set of nodes needed for identification of the ATE.
+  2. Declare your minimal identification set in a <set> tag (see format below).
+  3. If identifiable: make the fewest tool calls needed to compute ATE = E[Y=1|do(X=1)] − E[Y=1|do(X=0)].
   4. If not identifiable: declare not_identifiable.
 
 RESPONSE FORMAT
 ───────────────
 Turn 1 — Declaration:
-  Reason about the DAG. Write exactly one <set> tag before any tool calls:
+  Reason about the DAG to determine the miminal set of nodes needed for identification. Write exactly one <set> tag:
 
     <set>2, 3</set>    ← identification set {node2, node3}
     <set>{}</set>       ← empty identification set (no confounding on X→Y)
     <set></set>         ← ATE is not identifiable from observational data
 
   If the ATE is not identifiable, you may also write your final answer immediately:
-    <set></set><answer>not_identifiable</answer>
+    <set></set> <answer>not_identifiable</answer>
   Including <answer> tags ends the episode immediately.
 
-Subsequent turns — Tool use and answer (merged phase):
-  - You may use at most 5 tool calls total across all turns.
-  - Each turn: call a tool (environment returns the result, you continue)
-    OR write your final answer (including <answer> tags ends the episode).
-  - After your last allowed tool call result is returned, answer on the next turn.
-  - Write exactly one final answer:
+Turn 2 — Tool calls (one turn only):
+  - This is the ONLY turn in which you can call tools. Make all needed calls in parallel (up to a maximum of 3).
+  - The environment will return all results at once.
+  - Do NOT call tools if you already know the answer (e.g. not_identifiable). If you choose not to call tools, include your final answer in answer tags.
+  - Calling more than 3 tools in parallel will result in an error. 
+
+Turn 3 — Final answer:
+  - After receiving tool results, reason and then write exactly one final answer:
       <answer>ATE=0.2714</answer>   or   <answer>not_identifiable</answer>
   - Report ATE rounded to 4 decimal places.
 
@@ -78,7 +81,9 @@ Non-empty identification set M = {node1, node2} — mediator-style formula:
   Derive P(M|X) = P(X,M) / P(X) and P(X) = Σ_m P(X,M) from the marginal table.
 
 Rules:
-  • Write the <set> tag only in Turn 1, before any tool calls. The <set> tag MUST be present in your first response.
-  • Write the <answer> tag only once, in the final answer turn. This can be in Turn 1 if you beleive the ATE is not identifiable.
+  • Follow the instructions described earlier in RESPONSE_FORMAT closely for each turn.
+  • Write the <set> tag only in Turn 1. The <set> tag MUST be present in your first response.
+  • Do NOT call tools in Turn 1.
+  • Write the <answer> tag only once. This can be in Turn 1 if the ATE is not identifiable.
   • Do not query latent nodes — they will return an error.
 """

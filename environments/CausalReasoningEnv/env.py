@@ -1,10 +1,9 @@
-"""CausalATEEnv — two-phase StatefulToolEnv for ATE estimation.
+"""CausalATEEnv — three-turn StatefulToolEnv for ATE estimation.
 
-Phase 1 (declaration turn): Model reasons about the DAG and writes a <set> tag
-declaring its identification set. Scored independently of computation.
-
-Phase 2 (tool use + answer): Model calls tools and writes <answer> to end the episode.
-A global MAX_TOOL_CALLS cap enforces minimal tool use.
+Turn 1 (declaration): Model reasons about the DAG and writes a <set> tag.
+  - not_identifiable problems may also write <answer> here to end immediately.
+Turn 2 (tool turn): Model fires up to 3 parallel tool calls.
+Turn 3 (answer): Model writes <answer>ATE=...</answer> or <answer>not_identifiable</answer>.
 
 Reward components (weights: 0.05 / 0.30 / 0.15 / 0.50):
   format_compliance / set_valid / minimality / ate_accuracy
@@ -21,8 +20,8 @@ from networkx.algorithms.d_separation import is_d_separator
 
 from prompts import SYSTEM_PROMPT
 
-MAX_TOOL_CALLS = 5  # global cap; optimal max is 2
-MAX_TURNS = 7       # 1 declaration + up to 5 tool calls + 1 answer
+MAX_PARALLEL_TOOL_CALLS = 3  # frontdoor needs at most 3
+MAX_TURNS = 3                # declaration + tool turn + answer
 ATE_THRESHOLD = 0.01
 
 
@@ -368,7 +367,6 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state["_topo_order"] = topo_order
         state["_parents_map"] = parents_map
         state["_latent_nodes"] = latent_nodes
-        state["tool_calls_used"] = 0
         return state
 
     def update_tool_args(
@@ -389,11 +387,15 @@ class CausalATEEnv(vf.StatefulToolEnv):
         return args
 
     @vf.stop
-    def end_of_phase(self, messages: vf.Messages) -> bool:
-        """Stop conditions for the two-phase rollout.
+    def end_of_phase(self, messages: vf.Messages, state: vf.State = None, **kwargs) -> bool:
+        """Stop conditions for the three-turn rollout.
 
-        Turn 1 (declaration): stop only if <answer> is present.
-        Turn 2+ (tool use / answer): stop if <answer> present OR no tool call made.
+        Turn 1 (declaration): stop only if <answer> present (not_identifiable early exit).
+          Also sets state["declared_set"] here so reward functions have it even when
+          env_response is skipped.
+        Turn 2 (tool turn): stop if no tool calls (nothing for env to execute) or
+          model already has an answer.
+        Turn 3+: always stop.
         """
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
@@ -404,11 +406,18 @@ class CausalATEEnv(vf.StatefulToolEnv):
         has_answer = bool(re.search(r"<answer>\s*.+?\s*</answer>", content, re.DOTALL))
         has_tool_call = bool(last_assistant.get("tool_calls"))
         assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
+
         if assistant_turn == 1:
-            # Declaration turn: only stop if answer is present (e.g. not_identifiable)
+            if has_answer and state is not None:
+                state["declared_set"] = _parse_set(messages)
             return has_answer
-        # Tool use / answer phase: stop if answer present OR no tool call made
-        return has_answer or not has_tool_call
+
+        if assistant_turn == 2:
+            if not has_tool_call or has_answer:
+                return True
+            return False
+
+        return True
 
     async def env_response(
         self,
@@ -416,57 +425,51 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> vf.Messages:
-        """Execute tool calls with limit enforcement."""
+        """Three-turn rollout: handle declaration, tool execution, and limit enforcement."""
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
         has_tool_call = bool(last_assistant and last_assistant.get("tool_calls"))
+        assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
 
-        if not has_tool_call:
-            assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
-            if assistant_turn == 1:
-                declared_set = _parse_set(messages)
-                state["declared_set"] = declared_set
-                if declared_set is None:
-                    # No <set> tag in declaration — terminate rollout immediately
-                    termination = [{"role": "user", "content": "Rollout terminated: declaration turn must include a <set> tag."}]
-                    state["final_env_response"] = termination
-                    return termination
-                # Declaration phase complete — prompt model into tool use / answer phase
-                return [{"role": "user", "content": "Now use the available tools to compute the ATE, then provide your final answer in <answer>ATE=...</answer> or <answer>not_identifiable</answer>."}]
-            return []
+        if assistant_turn == 1:
+            if has_tool_call:
+                # Tool calls are not permitted in the declaration turn — terminate
+                tool_calls = last_assistant.get("tool_calls", [])
+                termination = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": "Error: tool calls are not permitted in the declaration turn. Rollout terminated.",
+                    }
+                    for tc in tool_calls
+                ]
+                state["final_env_response"] = termination
+                return termination
+            declared_set = _parse_set(messages)
+            state["declared_set"] = declared_set
+            if declared_set is None:
+                termination = [{"role": "user", "content": "Rollout terminated: declaration turn must include a <set> tag."}]
+                state["final_env_response"] = termination
+                return termination
+            return [{"role": "user", "content": "Now call tools to compute the ATE. You may make up to 3 parallel tool calls in this single turn. Then provide your final answer in <answer>ATE=...</answer> or <answer>not_identifiable</answer>."}]
 
-        tool_calls_used = state.get("tool_calls_used", 0)
-
-        if tool_calls_used >= MAX_TOOL_CALLS:
-            # Must respond to each pending tool call with a matching tool message
+        if assistant_turn == 2:
             tool_calls = last_assistant.get("tool_calls", [])
-            return [
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": "Tool call limit reached. Provide your final answer in <answer> tags now.",
-                }
-                for tc in tool_calls
-            ]
+            if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:
+                termination = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": f"Error: exceeded maximum of {MAX_PARALLEL_TOOL_CALLS} parallel tool calls. Rollout terminated.",
+                    }
+                    for tc in tool_calls
+                ]
+                state["final_env_response"] = termination
+                return termination
+            return await super().env_response(messages, state, **kwargs)
 
-        # Execute the tool via parent class
-        result_messages = await super().env_response(messages, state, **kwargs)
-
-        tool_calls_used += 1
-        state["tool_calls_used"] = tool_calls_used
-
-        if tool_calls_used >= MAX_TOOL_CALLS and result_messages:
-            # Append limit warning to last tool result
-            last_result = dict(result_messages[-1])
-            current_content = last_result.get("content", "")
-            last_result["content"] = (
-                current_content
-                + f"\n\n[You have used all {MAX_TOOL_CALLS} available tool calls. Provide your final answer now.]"
-            )
-            result_messages = list(result_messages[:-1]) + [last_result]
-
-        return result_messages
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
