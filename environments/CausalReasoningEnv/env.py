@@ -276,7 +276,8 @@ async def minimality(info, state) -> float:
     if problem_type == "not_identifiable":
         return 1.0  # full credit; no set to minimize
     # Gate on validity
-    if await set_valid(info, state) == 0.0:
+    validity = await set_valid(info, state)
+    if validity == 0.0:
         return 0.0
     declared_set = state.get("declared_set") or []
     minimal_set = info.get("minimal_set")
@@ -387,7 +388,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         return args
 
     @vf.stop
-    def end_of_phase(self, messages: vf.Messages, state: vf.State = None, **kwargs) -> bool:
+    async def end_of_phase(self, state: vf.State) -> bool:
         """Stop conditions for the three-turn rollout.
 
         Turn 1 (declaration): stop only if <answer> present (not_identifiable early exit).
@@ -397,6 +398,13 @@ class CausalATEEnv(vf.StatefulToolEnv):
           model already has an answer.
         Turn 3+: always stop.
         """
+        trajectory = state.get("trajectory", [])
+        if not trajectory:
+            return False
+        last_step = trajectory[-1]
+        messages = list(last_step["prompt"]) + list(last_step["completion"])
+
+
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
@@ -408,7 +416,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
 
         if assistant_turn == 1:
-            if has_answer and state is not None:
+            if has_answer:
                 state["declared_set"] = _parse_set(messages)
             return has_answer
 
@@ -482,6 +490,7 @@ def load_environment(**kwargs) -> CausalATEEnv:
 
     Load from HuggingFace Hub (irfanjamil/causal-reasoning-ate).
     """
+    
     train_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="train")
     eval_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="eval")
     return CausalATEEnv(dataset=train_ds, eval_dataset=eval_ds, **kwargs)
