@@ -424,6 +424,18 @@ class CausalATEEnv(vf.StatefulToolEnv):
         args["_parents_map"] = state["_parents_map"]
         args["_latent_nodes"] = state["_latent_nodes"]
         return args
+    
+
+    @vf.stop
+    async def no_tools_called(self, state: vf.State) -> bool:
+        if len(state["trajectory"]) <= 1 or len(state["trajectory"])==3:
+            return False
+        last_message = state["trajectory"][-1]["completion"][-1]
+        is_assistant_message = last_message["role"] == "assistant"
+        no_tool_calls = (
+            "tool_calls" not in last_message or last_message["tool_calls"] is None
+        )
+        return is_assistant_message and no_tool_calls
 
     @vf.stop
     async def end_of_phase(self, state: vf.State) -> bool:
@@ -459,7 +471,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
             return has_answer
 
         if assistant_turn == 2:
-            if not has_tool_call or has_answer:
+            if has_answer:
                 return True
             return False
 
