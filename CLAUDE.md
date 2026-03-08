@@ -7,6 +7,7 @@ Before beginning work in this repository, read `AGENTS.md` and follow all scoped
 ## Project Overview
 
 This is a workspace for building RL environments using Prime Intellect's **verifiers** framework. Environments built with Verifiers are self-contained Python modules. Environments are installable Python packages that expose a `load_environment()` function returning a `vf.Environment`.
+The **verifiers** source code is located at: /Users/irfanjamil/.local/share/uv/tools/prime/lib/python3.12/site-packages/verifiers
 
 ## Commands
 

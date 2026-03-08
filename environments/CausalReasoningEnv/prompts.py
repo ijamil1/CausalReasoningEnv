@@ -51,6 +51,7 @@ Turn 1 — Declaration:
   If the ATE is not identifiable, you may also write your final answer immediately:
     <set></set> <answer>not_identifiable</answer>
   Including <answer> tags ends the episode immediately.
+  DO NOT CALL TOOLS IN TURN 1
 
 Turn 2 — Tool calls (one turn only):
   - This is the ONLY turn in which you can call tools. Make all needed calls in parallel (up to a maximum of 3).

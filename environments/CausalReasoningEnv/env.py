@@ -213,6 +213,41 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Termination metrics (weight=0 — observability only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def terminated_tool_call_turn1(completion) -> float:
+    """1.0 if rollout terminated because a tool call was made in the declaration turn."""
+    for msg in completion:
+        if msg.get("role") == "tool":
+            content = msg.get("content", "")
+            if "Error" in content and "declaration turn" in content:
+                return 1.0
+    return 0.0
+
+
+async def terminated_too_many_parallel_tool_calls(completion) -> float:
+    """1.0 if rollout terminated because more than the max parallel tool calls were made."""
+    for msg in completion:
+        if msg.get("role") == "tool":
+            content = msg.get("content", "")
+            if "Error" in content and "parallel tool calls" in content:
+                return 1.0
+    return 0.0
+
+
+async def terminated_missing_set_declaration(completion) -> float:
+    """1.0 if rollout terminated because the declaration turn had no <set> tag."""
+    for msg in completion:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if "declaration turn must include a <set> tag" in content:
+                return 1.0
+    return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Reward functions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -338,6 +373,9 @@ class CausalATEEnv(vf.StatefulToolEnv):
         )
         self.add_tool(marginal, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         self.add_tool(conditional, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
+        rubric.add_metric(terminated_tool_call_turn1)
+        rubric.add_metric(terminated_too_many_parallel_tool_calls)
+        rubric.add_metric(terminated_missing_set_declaration)
 
     async def setup_state(self, state: vf.State) -> vf.State:
         """Deserialize CPTs and domain info from the problem info dict."""

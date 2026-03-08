@@ -544,7 +544,7 @@ def format_problem(p: dict) -> str:
     has_latent = bool(latent)
     obs_str = ", ".join(str(nd) for nd in observed)
     lat_str = ", ".join(str(nd) for nd in latent) if latent else "none"
-    edge_str = ", ".join(f"{u}→{v}" for u, v in edges)
+    edge_str = ", ".join(f"{u}->{v}" for u, v in edges)
 
     G = nx.DiGraph()
     G.add_nodes_from(nodes)
