@@ -1,9 +1,10 @@
-"""CausalATEEnv — three-turn StatefulToolEnv for ATE estimation.
+"""CausalATEEnv — two-turn StatefulToolEnv for ATE estimation.
 
-Turn 1 (declaration): Model reasons about the DAG and writes a <set> tag.
-  - not_identifiable problems may also write <answer> here to end immediately.
-Turn 2 (tool turn): Model fires up to 3 parallel tool calls.
-Turn 3 (answer): Model writes <answer>ATE=...</answer> or <answer>not_identifiable</answer>.
+Turn 1 (declaration + tools): Model reasons about the DAG, writes a <set> tag,
+  and makes all needed tool calls in the same response.
+  - not_identifiable problems write <set></set><answer>not_identifiable</answer>
+    with no tool calls — end_of_phase fires immediately.
+Turn 2 (answer): Model receives tool results and writes <answer>ATE=...</answer>.
 
 Reward components (weights: 0.05 / 0.30 / 0.15 / 0.50):
   format_compliance / set_valid / minimality / ate_accuracy
@@ -21,7 +22,7 @@ from networkx.algorithms.d_separation import is_d_separator
 from prompts import SYSTEM_PROMPT
 
 MAX_PARALLEL_TOOL_CALLS = 3  # frontdoor needs at most 3
-MAX_TURNS = 3                # declaration + tool turn + answer
+MAX_TURNS = 2                # declaration + tools / answer
 ATE_THRESHOLD = 0.01
 
 
@@ -217,16 +218,6 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def terminated_tool_call_turn1(completion) -> float:
-    """1.0 if rollout terminated because a tool call was made in the declaration turn."""
-    for msg in completion:
-        if msg.get("role") == "tool":
-            content = msg.get("content", "")
-            if "Error" in content and "declaration turn" in content:
-                return 1.0
-    return 0.0
-
-
 async def terminated_too_many_parallel_tool_calls(completion) -> float:
     """1.0 if rollout terminated because more than the max parallel tool calls were made."""
     for msg in completion:
@@ -373,7 +364,6 @@ class CausalATEEnv(vf.StatefulToolEnv):
         )
         self.add_tool(marginal, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         self.add_tool(conditional, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
-        rubric.add_metric(terminated_tool_call_turn1)
         rubric.add_metric(terminated_too_many_parallel_tool_calls)
         rubric.add_metric(terminated_missing_set_declaration)
 
@@ -428,32 +418,27 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
     @vf.stop
     async def no_tools_called(self, state: vf.State) -> bool:
-        if len(state["trajectory"]) <= 1 or len(state["trajectory"])==3:
-            return False
-        last_message = state["trajectory"][-1]["completion"][-1]
-        is_assistant_message = last_message["role"] == "assistant"
-        no_tool_calls = (
-            "tool_calls" not in last_message or last_message["tool_calls"] is None
-        )
-        return is_assistant_message and no_tool_calls
+        return False
 
     @vf.stop
     async def end_of_phase(self, state: vf.State) -> bool:
-        """Stop conditions for the three-turn rollout.
+        """Stop conditions for the two-turn rollout.
 
-        Turn 1 (declaration): stop only if <answer> present (not_identifiable early exit).
-          Also sets state["declared_set"] here so reward functions have it even when
-          env_response is skipped.
-        Turn 2 (tool turn): stop if no tool calls (nothing for env to execute) or
-          model already has an answer.
-        Turn 3+: always stop.
+        Turn 1 (declaration + tools):
+          Valid continuation (return False — proceed to env_response):
+            tool calls present, no answer, <set> tag present.
+          Stop (return True):
+            - no <set> tag → format error
+            - tool calls + answer → mutually exclusive, error
+            - no tool calls + no answer → incomplete response, error
+            - no tool calls + answer → valid early exit (e.g. not_identifiable); sets declared_set
+        Turn 2 (answer): always stop.
         """
         trajectory = state.get("trajectory", [])
         if not trajectory:
             return False
         last_step = trajectory[-1]
         messages = list(last_step["prompt"]) + list(last_step["completion"])
-
 
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
@@ -463,19 +448,22 @@ class CausalATEEnv(vf.StatefulToolEnv):
         content = last_assistant.get("content", "") or ""
         has_answer = bool(re.search(r"<answer>\s*.+?\s*</answer>", content, re.DOTALL))
         has_tool_call = bool(last_assistant.get("tool_calls"))
+        has_set = bool(re.search(r"<set>.*?</set>", content, re.DOTALL))
         assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
 
         if assistant_turn == 1:
-            if has_answer:
+            if not has_set:
+                return True  # error: missing <set> tag
+            if has_tool_call and has_answer:
+                return True  # error: tool calls and answer are mutually exclusive
+            if not has_tool_call and not has_answer:
+                return True  # error: incomplete — neither tool calls nor answer
+            if has_answer and not has_tool_call:
                 state["declared_set"] = _parse_set(messages)
-            return has_answer
+                return True  # valid early exit (not_identifiable)
+            return False  # valid: tool calls present, no answer → execute tools
 
-        if assistant_turn == 2:
-            if has_answer:
-                return True
-            return False
-
-        return True
+        return True  # turn 2: always stop
 
     async def env_response(
         self,
@@ -483,51 +471,33 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> vf.Messages:
-        """Three-turn rollout: handle declaration, tool execution, and limit enforcement."""
+        """Turn 1 only: parse declared set, enforce tool call limit, execute tools.
+
+        Only reached when end_of_phase returned False (tool calls present, no answer,
+        <set> tag present). Turn 2 always stops via end_of_phase before reaching here.
+        """
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
-        has_tool_call = bool(last_assistant and last_assistant.get("tool_calls"))
-        assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
+        tool_calls = last_assistant.get("tool_calls", []) if last_assistant else []
 
-        if assistant_turn == 1:
-            if has_tool_call:
-                # Tool calls are not permitted in the declaration turn — terminate
-                tool_calls = last_assistant.get("tool_calls", [])
-                termination = [
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": "Error: tool calls are not permitted in the declaration turn. Rollout terminated.",
-                    }
-                    for tc in tool_calls
-                ]
-                state["final_env_response"] = termination
-                return termination
-            declared_set = _parse_set(messages)
-            state["declared_set"] = declared_set
-            if declared_set is None:
-                termination = [{"role": "user", "content": "Rollout terminated: declaration turn must include a <set> tag."}]
-                state["final_env_response"] = termination
-                return termination
-            return [{"role": "user", "content": "Now call tools to compute the ATE. You may make up to 3 parallel tool calls in this single turn. Then provide your final answer in <answer>ATE=...</answer> or <answer>not_identifiable</answer>."}]
+        # Parse and store declared set
+        state["declared_set"] = _parse_set(messages)
 
-        if assistant_turn == 2:
-            tool_calls = last_assistant.get("tool_calls", [])
-            if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:
-                termination = [
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": f"Error: exceeded maximum of {MAX_PARALLEL_TOOL_CALLS} parallel tool calls. Rollout terminated.",
-                    }
-                    for tc in tool_calls
-                ]
-                state["final_env_response"] = termination
-                return termination
-            return await super().env_response(messages, state, **kwargs)
+        # Enforce parallel tool call limit
+        if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:
+            termination = [
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": f"Error: exceeded maximum of {MAX_PARALLEL_TOOL_CALLS} parallel tool calls. Rollout terminated.",
+                }
+                for tc in tool_calls
+            ]
+            state["final_env_response"] = termination
+            return termination
 
-        return []
+        return await super().env_response(messages, state, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

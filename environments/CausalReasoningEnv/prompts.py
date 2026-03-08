@@ -32,37 +32,40 @@ You have access to two probability query tools backed by exact CPT enumeration:
 
 TASK
 ────
-Using the DAG structure and the probability query tools, you have a maximum of 3 turns to:
+You have exactly 2 turns to solve the problem:
 
-  1. Reason about the causal structure to determine the miminal set of nodes needed for identification of the ATE.
-  2. Declare your minimal identification set in a <set> tag (see format below).
-  3. If identifiable: make the fewest tool calls needed to compute ATE = E[Y=1|do(X=1)] − E[Y=1|do(X=0)].
-  4. If not identifiable: declare not_identifiable.
+  1. Reason about the causal structure to determine the minimal identification set.
+  2. Declare your identification set and make all needed tool calls in the same response.
+  3. After receiving tool results, compute and report the ATE.
 
 RESPONSE FORMAT
 ───────────────
-Turn 1 — Declaration:
-  Reason about the DAG to determine the miminal set of nodes needed for identification. Write exactly one <set> tag:
+Turn 1 — Declaration + Tool calls (single response):
+  Reason about the DAG, then write exactly one <set> tag AND make all needed tool calls
+  in the same response. Tool calls and the <set> tag are required together.
 
     <set>2, 3</set>    ← identification set {node2, node3}
     <set>{}</set>       ← empty identification set (no confounding on X→Y)
     <set></set>         ← ATE is not identifiable from observational data
 
-  If the ATE is not identifiable, you may also write your final answer immediately:
-    <set></set> <answer>not_identifiable</answer>
-  Including <answer> tags ends the episode immediately.
-  DO NOT CALL TOOLS IN TURN 1
+  If the ATE is not identifiable, skip tool calls and write your final answer instead:
+    <set></set>
+    <answer>not_identifiable</answer>
 
-Turn 2 — Tool calls (one turn only):
-  - This is the ONLY turn in which you can call tools. Make all needed calls in parallel (up to a maximum of 3).
-  - The environment will return all results at once.
-  - Do NOT call tools if you already know the answer (e.g. not_identifiable). If you choose not to call tools, include your final answer in answer tags.
-  - Calling more than 3 tools in parallel will result in an error. 
+  Rules for Turn 1:
+    • The <set> tag is REQUIRED in every Turn 1 response.
+    • Tool calls and <answer> tags are MUTUALLY EXCLUSIVE — use one or the other, never both.
+    • Make all needed tool calls in parallel (up to a maximum of 3).
+    • Calling more than 3 tools in parallel will result in an error and rollout termination.
+    • Do not query latent nodes — they will return an error.
 
-Turn 3 — Final answer:
-  - After receiving tool results, reason and then write exactly one final answer:
+Turn 2 — Final answer:
+  After receiving tool results, reason and then write exactly one final answer:
       <answer>ATE=0.2714</answer>   or   <answer>not_identifiable</answer>
-  - Report ATE rounded to 4 decimal places.
+  Report ATE rounded to 4 decimal places.
+
+  Rules for Turn 2:
+    • Write exactly one <answer> tag. Do NOT make any tool calls.
 
 MINIMAL TOOL CALL PATTERNS
 ───────────────────────────
@@ -80,11 +83,4 @@ Non-empty identification set M = {node1, node2} — mediator-style formula:
            conditional(["Y_id"], ["X_id", "1", "2"])  → P(Y | X, M) for all strata
   ATE = Σ_m [P(M=m|X=1) − P(M=m|X=0)] · Σ_{x'} P(Y=1|M=m, X=x') · P(X=x')
   Derive P(M|X) = P(X,M) / P(X) and P(X) = Σ_m P(X,M) from the marginal table.
-
-Rules:
-  • Follow the instructions described earlier in RESPONSE_FORMAT closely for each turn.
-  • Write the <set> tag only in Turn 1. The <set> tag MUST be present in your first response.
-  • Do NOT call tools in Turn 1.
-  • Write the <answer> tag only once. This can be in Turn 1 if the ATE is not identifiable.
-  • Do not query latent nodes — they will return an error.
 """
