@@ -228,15 +228,6 @@ async def terminated_too_many_parallel_tool_calls(completion) -> float:
     return 0.0
 
 
-async def terminated_missing_set_declaration(completion) -> float:
-    """1.0 if rollout terminated because the declaration turn had no <set> tag."""
-    for msg in completion:
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if "declaration turn must include a <set> tag" in content:
-                return 1.0
-    return 0.0
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reward functions
@@ -365,7 +356,6 @@ class CausalATEEnv(vf.StatefulToolEnv):
         self.add_tool(marginal, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         self.add_tool(conditional, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         rubric.add_metric(terminated_too_many_parallel_tool_calls)
-        rubric.add_metric(terminated_missing_set_declaration)
 
     async def setup_state(self, state: vf.State) -> vf.State:
         """Deserialize CPTs and domain info from the problem info dict."""
@@ -497,7 +487,16 @@ class CausalATEEnv(vf.StatefulToolEnv):
             state["final_env_response"] = termination
             return termination
 
-        return await super().env_response(messages, state, **kwargs)
+        tool_messages = await super().env_response(messages, state, **kwargs)
+        tool_messages.append({
+            "role": "user",
+            "content": (
+                "Tool results are above. Now use this information and your domain knowledge to compute the ATE and write your final answer.\n"
+                "You MUST end your response with exactly one <answer>ATE=...</answer> tag "
+                "(or <answer>not_identifiable</answer>). Do NOT make any tool calls."
+            ),
+        })
+        return tool_messages
 
 
 # ─────────────────────────────────────────────────────────────────────────────
