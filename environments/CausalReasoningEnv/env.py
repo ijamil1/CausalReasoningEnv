@@ -8,6 +8,10 @@ Turn 2 (answer): Model receives tool results and writes <answer>ATE=...</answer>
 
 Reward components (weights: 0.05 / 0.30 / 0.15 / 0.50):
   format_compliance / set_valid / minimality / ate_accuracy
+
+true_ATE is computed in gen.py using the same 6dp rounding as the tools, then
+rounded to 4dp. A perfect model gets exact equality; ate_accuracy uses 5e-5
+tolerance to absorb float representation differences.
 """
 
 import json
@@ -23,7 +27,6 @@ from prompts import SYSTEM_PROMPT
 
 MAX_PARALLEL_TOOL_CALLS = 3  # frontdoor needs at most 3
 MAX_TURNS = 2                # declaration + tools / answer
-ATE_THRESHOLD = 0.01
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +336,7 @@ async def ate_accuracy(completion, info, **kwargs) -> float:
     true_ate = info.get("true_ATE")
     if true_ate is None:
         return 0.0
-    return 1.0 if abs(ate_hat - true_ate) <= ATE_THRESHOLD else 0.0
+    return 1.0 if abs(ate_hat - true_ate) < 5e-5 else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

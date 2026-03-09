@@ -32,28 +32,30 @@ You have access to two probability query tools backed by exact CPT enumeration:
 
 TASK
 ────
-You have exactly 2 turns to solve the problem:
+You have exactly 2 turns to:
 
-  1. Reason about the causal structure to determine the minimal identification set.
+  1. Reason about the causal structure to determine the minimal identification set for computing the Average Treatment Effect (ATE) of X on Y.
   2. Declare your identification set and make all needed tool calls in the same response.
-  3. After receiving tool results, compute and report the ATE.
+  3. Compute and report the ATE given the results of the tool calls.
+
+You will be scored on the validity of the identifiation set, the minimality of the identification set, and the accuracy of your ATE answer.
+Your score will suffer if you do not follow the specified format for your responses for each turn. See below for the expected format.
 
 RESPONSE FORMAT
 ───────────────
 Turn 1 — Declaration + Tool calls (single response):
   Reason about the DAG, then write exactly one <set> tag AND make all needed tool calls
   in the same response. Tool calls and the <set> tag are required together.
-
-    <set>2, 3</set>    ← identification set {node2, node3}
-    <set>{}</set>       ← empty identification set (no confounding on X→Y)
-    <set></set>         ← ATE is not identifiable from observational data
+    <set>2, 3</set>   <- identification set {node2, node3}
+    <set>{}</set>      <- empty identification set (no confounding on X→Y)
+    <set></set>        <- ATE is not identifiable from observational data
 
   If the ATE is not identifiable, skip tool calls and write your final answer instead:
     <set></set>
     <answer>not_identifiable</answer>
 
   Rules for Turn 1:
-    • The <set> tag is REQUIRED in every Turn 1 response.
+    • The <set> tag is REQUIRED in every Turn 1 response. Do not include X or Y in the identification set.
     • Tool calls and <answer> tags are MUTUALLY EXCLUSIVE — use one or the other, never both.
     • Make all needed tool calls in parallel (up to a maximum of 3).
     • Calling more than 3 tools in parallel will result in an error and rollout termination.
@@ -67,20 +69,22 @@ Turn 2 — Final answer:
   Rules for Turn 2:
     • Write exactly one <answer> tag. Do NOT make any tool calls.
 
-MINIMAL TOOL CALL PATTERNS
-───────────────────────────
-Empty identification set <set>{}</set> — no confounding, direct effect readable:
-  1 call:  conditional(["Y_id"], ["X_id"])
-  ATE = P(Y=1 | X=1) − P(Y=1 | X=0)
+TOOL USAGE EXAMPLES
+────────────────────
+To compute P(node2, node3) for all value combinations:
+  marginal(["2", "3"])
+  returns -> P(node2=0, node3=0) = 0.3211
+    P(node2=0, node3=1) = 0.1789  ...
 
-Non-empty identification set Z = {node2, node3} — adjustment-style formula:
-  2 calls: conditional(["Y_id"], ["X_id", "2", "3"])  → P(Y | X, Z) for all strata
-           marginal(["2", "3"])                        → P(Z) for all combinations
-  ATE = Σ_z [P(Y=1|X=1,Z=z) − P(Y=1|X=0,Z=z)] · P(Z=z)
+To compute P(node4 | node0, node2) for all strata:
+  conditional(["4"], ["0", "2"])
+  returns -> P(node4=0 | node0=0, node2=0) = 0.7234
+    P(node4=1 | node0=0, node2=0) = 0.2766  ...
 
-Non-empty identification set M = {node1, node2} — mediator-style formula:
-  2 calls: marginal(["X_id", "1", "2"])               → joint P(X, M); derive P(M|X) and P(X)
-           conditional(["Y_id"], ["X_id", "1", "2"])  → P(Y | X, M) for all strata
-  ATE = Σ_m [P(M=m|X=1) − P(M=m|X=0)] · Σ_{x'} P(Y=1|M=m, X=x') · P(X=x')
-  Derive P(M|X) = P(X,M) / P(X) and P(X) = Σ_m P(X,M) from the marginal table.
+To compute P(node4 | node0) marginalizing over everything else:
+  conditional(["4"], ["0"])
+  returns -> P(node4=0 | node0=0) = 0.5512
+    P(node4=1 | node0=0) = 0.4488  ...
+
+Make all needed calls in parallel (up to a maximum of 3).
 """
