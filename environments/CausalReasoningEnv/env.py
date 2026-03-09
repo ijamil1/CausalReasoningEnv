@@ -4,14 +4,16 @@ Turn 1 (declaration + tools): Model reasons about the DAG, writes a <set> tag,
   and makes all needed tool calls in the same response.
   - not_identifiable problems write <set></set><answer>not_identifiable</answer>
     with no tool calls — end_of_phase fires immediately.
+  - If the declared set is invalid, env_response terminates the rollout immediately
+    without offering Turn 2.
 Turn 2 (answer): Model receives tool results and writes <answer>ATE=...</answer>.
 
-Reward components (weights: 0.05 / 0.30 / 0.15 / 0.50):
-  format_compliance / set_valid / minimality / ate_accuracy
+Reward components (weights: 0.05 / 0.30 / 0.15 / 0.25 / 0.25):
+  format_compliance / set_valid / minimality / process_correctness / ate_accuracy
 
-true_ATE is computed in gen.py using the same 6dp rounding as the tools, then
-rounded to 4dp. A perfect model gets exact equality; ate_accuracy uses 5e-5
-tolerance to absorb float representation differences.
+process_correctness checks that the model made exactly the expected tool calls
+(by type and argument) given the declared set and problem type (binary: 1.0 / 0.0).
+ate_accuracy is gated on process_correctness == 1.0 and uses absolute tolerance 0.1.
 """
 
 import json
@@ -248,24 +250,19 @@ async def format_compliance(completion, state) -> float:
     return score
 
 
-async def set_valid(info, state) -> float:
-    """1.0 if declared set satisfies the identification criterion for this problem type."""
-    if isinstance(info, str):
-        info = json.loads(info)
+def _is_valid_set(declared_set: list[int] | None, info: dict) -> bool:
+    """Return True if declared_set satisfies the identification criterion for this problem type."""
     problem_type = info.get("problem_type", "")
 
-    declared_set = state.get("declared_set")
     if declared_set is None:
-        return 0.0  # identifiable problem but no <set> tag declared
-    
+        return False  # no <set> tag declared
+
     if problem_type == "not_identifiable":
-        if len(declared_set) > 0:
-            return 0
-        return 1.0  # no set needed; answer block checked by ate_accuracy
+        return len(declared_set) == 0  # no set needed
 
     latent_nodes = set(info.get("latent_nodes", []))
     if any(n in latent_nodes for n in declared_set):
-        return 0.0
+        return False
 
     X, Y = info["X"], info["Y"]
     G = _reconstruct_graph(info)
@@ -273,21 +270,28 @@ async def set_valid(info, state) -> float:
     if problem_type in ("backdoor_empty", "backdoor_standard"):
         Z = set(declared_set)
         if Z & nx.descendants(G, X):  # Z contains a descendant of X
-            return 0.0
+            return False
         G_back = G.copy()
         G_back.remove_edges_from(list(G.out_edges(X)))
         try:
-            return 1.0 if is_d_separator(G_back, {X}, {Y}, Z) else 0.0
+            return is_d_separator(G_back, {X}, {Y}, Z)
         except Exception:
-            return 0.0
+            return False
 
     if problem_type == "frontdoor":
         M = set(declared_set)
         if not M:
-            return 0.0
-        return 1.0 if _check_frontdoor_conditions(G, X, Y, M) else 0.0
+            return False
+        return _check_frontdoor_conditions(G, X, Y, M)
 
-    return 0.0
+    return False
+
+
+async def set_valid(info, state) -> float:
+    """1.0 if declared set satisfies the identification criterion for this problem type."""
+    if isinstance(info, str):
+        info = json.loads(info)
+    return 1.0 if _is_valid_set(state.get("declared_set"), info) else 0.0
 
 
 async def minimality(info, state) -> float:
@@ -315,8 +319,89 @@ async def minimality(info, state) -> float:
     return min(1.0, k / declared_size)
 
 
-async def ate_accuracy(completion, info, **kwargs) -> float:
-    """1.0 if final answer matches true_ATE within tolerance or correctly states not_identifiable."""
+async def process_correctness(completion, info, state) -> float:
+    """1.0 if the model made exactly the expected tool calls given the declared set and problem type.
+
+    Gated on set validity. Expected calls per problem type:
+      not_identifiable        : 0 calls
+      backdoor_empty (Z=[])   : conditional(query=[Y], given=[X])
+      backdoor_standard (Z≠[]):  marginal(variables=Z) + conditional(query=[Y], given=[X]+Z)
+      frontdoor (M≠[])        : marginal(variables=[X]) + conditional(query=M, given=[X])
+                                 + conditional(query=[Y], given=M+[X])
+    Extra tool calls beyond the expected ones are ignored.
+    """
+    if isinstance(info, str):
+        info = json.loads(info)
+
+    score = 0.0
+
+    if not _is_valid_set(state.get("declared_set"), info):
+        state["process_correctness_score"] = score
+        return score
+
+    problem_type = info["problem_type"]
+    declared_set = state.get("declared_set") or []
+    X, Y = str(info["X"]), str(info["Y"])
+    Z = [str(n) for n in declared_set]
+    M = Z  # alias for frontdoor mediator set
+
+    # Build expected calls as (tool_name, frozenset_of_key_args) tuples.
+    # For marginal: key = frozenset of variables.
+    # For conditional: key = (frozenset of query, frozenset of given).
+    if problem_type == "not_identifiable":
+        expected: list[tuple] = []
+    elif problem_type in ("backdoor_empty", "backdoor_standard") and not declared_set:
+        expected = [("conditional", frozenset([Y]), frozenset([X]))]
+    elif problem_type in ("backdoor_empty", "backdoor_standard"):
+        expected = [
+            ("marginal", frozenset(Z)),
+            ("conditional", frozenset([Y]), frozenset([X] + Z)),
+        ]
+    elif problem_type == "frontdoor":
+        expected = [
+            ("marginal", frozenset([X])),
+            ("conditional", frozenset(M), frozenset([X])),
+            ("conditional", frozenset([Y]), frozenset(M + [X])),
+        ]
+    else:
+        state["process_correctness_score"] = score
+        return score
+
+    # Parse actual tool calls from first Turn 1 assistant message.
+    actual: list[tuple] = []
+    for msg in completion:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                name = tc.get("function", {}).get("name", "")
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except (KeyError, json.JSONDecodeError):
+                    continue
+                if name == "marginal":
+                    vars_ = frozenset(str(v) for v in args.get("variables", []))
+                    actual.append(("marginal", vars_))
+                elif name == "conditional":
+                    query = frozenset(str(v) for v in args.get("query", []))
+                    given = frozenset(str(v) for v in args.get("given", []))
+                    actual.append(("conditional", query, given))
+            break  # only look at Turn 1
+
+    # Binary: all expected calls must appear in actual (extra calls ignored).
+    def call_present(exp_call: tuple) -> bool:
+        return any(a == exp_call for a in actual)
+
+    score = 1.0 if all(call_present(e) for e in expected) else 0.0
+    state["process_correctness_score"] = score
+    return score
+
+
+async def ate_accuracy(completion, info, state) -> float:
+    """1.0 if final answer matches true_ATE within tolerance or correctly states not_identifiable.
+
+    Gated on process_correctness == 1.0. Absolute tolerance: 0.1.
+    """
+    if state.get("process_correctness_score", 0.0) < 1.0:
+        return 0.0
     if isinstance(info, str):
         info = json.loads(info)
     answer = _parse_answer(completion)
@@ -336,7 +421,7 @@ async def ate_accuracy(completion, info, **kwargs) -> float:
     true_ate = info.get("true_ATE")
     if true_ate is None:
         return 0.0
-    return 1.0 if abs(ate_hat - true_ate) < 5e-5 else 0.0
+    return 1.0 if abs(ate_hat - true_ate) < 0.1 else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,8 +434,8 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
     def __init__(self, dataset: Dataset, eval_dataset: Dataset | None = None, **kwargs):
         rubric = vf.Rubric(
-            funcs=[format_compliance, set_valid, minimality, ate_accuracy],
-            weights=[0.05, 0.30, 0.15, 0.50],
+            funcs=[format_compliance, set_valid, minimality, process_correctness, ate_accuracy],
+            weights=[0.05, 0.30, 0.15, 0.25, 0.25],
         )
         super().__init__(
             dataset=dataset,
@@ -469,7 +554,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> vf.Messages:
-        """Turn 1 only: parse declared set, enforce tool call limit, execute tools.
+        """Turn 1 only: parse declared set, validate set, enforce tool call limit, execute tools.
 
         Only reached when end_of_phase returned False (tool calls present, no answer,
         <set> tag present). Turn 2 always stops via end_of_phase before reaching here.
@@ -481,6 +566,15 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
         # Parse and store declared set
         state["declared_set"] = _parse_set(messages)
+
+        # Gate on set validity — terminate before executing any tools if invalid
+        info = state.get("info") or {}
+        if isinstance(info, str):
+            info = json.loads(info)
+        if not _is_valid_set(state["declared_set"], info):
+            termination = [{"role": "user", "content": "The identification set you declared is not valid. Rollout terminated."}]
+            state["final_env_response"] = termination
+            return termination
 
         # Enforce parallel tool call limit
         if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:

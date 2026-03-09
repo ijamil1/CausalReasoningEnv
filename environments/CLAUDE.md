@@ -16,7 +16,7 @@ The environment implements a two-phase rollout over CPT-based DAGs:
 
 **Phase 1 (declaration):** Model reasons about the DAG and writes `<set>…</set>` to declare its identification set — scored independently of computation.
 
-**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 5 tool calls (optimal max is 2).
+**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 3 tool calls (optimal max is 3 for frontdoor). If the declared set is invalid, `env_response` terminates the rollout immediately without offering Phase 2.
 
 ### Problem Types
 
@@ -35,15 +35,16 @@ Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](Caus
 - `_make_dag`, `_try_sample_backdoor`, `_try_sample_frontdoor` — DAG generation (in `gen.py`)
 - `_check_frontdoor_conditions` — frontdoor condition checker; defined in both `gen.py` and `env.py`
 - `format_problem` — DAG text rendering (in `gen.py`)
-- `_parse_set`, `_reconstruct_graph` — reward function helpers (in `env.py`)
+- `_parse_set`, `_reconstruct_graph`, `_is_valid_set` — reward function helpers (in `env.py`)
 
 ### Reward Rubric
 
-4-component rubric (weights: 0.05 / 0.30 / 0.15 / 0.50):
+5-component rubric (weights: 0.05 / 0.30 / 0.15 / 0.25 / 0.25):
 - **`format_compliance`** — valid `<answer>` block present
 - **`set_valid`** — declared `<set>` satisfies the identification criterion for this problem type
 - **`minimality`** — graded: 1.0 if minimal size, k/|declared| if valid superset
-- **`ate_accuracy`** — final answer within ±0.01 of true ATE (or correct not_identifiable)
+- **`process_correctness`** — binary 1.0 if all expected tool calls (by type + args) are present; gated on `set_valid`
+- **`ate_accuracy`** — final answer within absolute ±0.1 of true ATE (or correct not_identifiable); gated on `process_correctness`
 
 ### Tools for CausalReasoningEnv
 

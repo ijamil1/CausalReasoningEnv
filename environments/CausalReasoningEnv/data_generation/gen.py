@@ -24,7 +24,7 @@ Data fields per problem:
   topo_order              list of int
   parents_map             dict str(node_id) → list of int parent ids
   identifiability_status  "identifiable" | "not_identifiable"
-  true_ATE                float | None  (tool-equivalent: 6dp intermediate, 4dp final)
+  true_ATE                float | None  (exact, via do-calculus enumeration)
   minimal_set             list[int] | None  (minimal adjustment or mediator set)
   optimal_turns           int  (0/1/2/2 for not_identifiable/backdoor_empty/standard/frontdoor)
 """
@@ -156,102 +156,44 @@ def _serialize_cpts(cpts: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ATE computation via tool-equivalent formula
+# Exact ATE computation via do-calculus enumeration
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _compute_true_ate_via_tools(
+def _compute_true_ate_exact(
     X: int,
     Y: int,
-    minimal_set: list,
-    problem_type: str,
     cpts: dict,
     n_cats: dict,
     topo_order: list,
     parents_map: dict,
 ) -> float:
-    """Compute true ATE using the same rounding as the probability query tools.
+    """Compute true ATE exactly via do-calculus enumeration (no simulation)."""
+    non_xy = [nd for nd in topo_order if nd != X and nd != Y]
 
-    Intermediate conditional/marginal probabilities are rounded to 6 decimal
-    places (matching marginal() and conditional() tool output), and the final
-    ATE is rounded to 4 decimal places (matching the model's answer format).
-    A perfect model that calls the correct tools and applies the right formula
-    should report exactly this value.
-    """
-
-    def _joint(assignments: dict) -> float:
-        """Exact joint probability P(assignments)."""
-        prob_sum = 0.0
-        for vals in itertools_product(*[range(n_cats[nd]) for nd in topo_order]):
-            config = dict(zip(topo_order, vals))
-            if any(config[k] != v for k, v in assignments.items()):
-                continue
-            joint = 1.0
-            for nd in topo_order:
+    def e_y_do_x(x_val: int) -> float:
+        ey = 0.0
+        for vals in itertools_product(*[range(n_cats[nd]) for nd in non_xy]):
+            config = dict(zip(non_xy, vals))
+            config[X] = x_val
+            config[Y] = 1
+            prob = 1.0
+            for nd in non_xy:
                 pa = parents_map[nd]
                 pa_vals = tuple(config[p] for p in pa)
                 cpt_entry = cpts[nd][pa_vals]
                 v = config[nd]
                 if n_cats[nd] == 2:
-                    joint *= cpt_entry if v == 1 else (1.0 - cpt_entry)
+                    prob *= cpt_entry if v == 1 else (1.0 - cpt_entry)
                 else:
-                    joint *= cpt_entry[v]
-            prob_sum += joint
-        return prob_sum
+                    prob *= cpt_entry[v]
+            # Y is always binary; CPT entry IS P(Y=1 | pa(Y))
+            pa_y_vals = tuple(config[p] for p in parents_map[Y])
+            prob *= cpts[Y][pa_y_vals]
+            ey += prob
+        return ey
 
-    def _cond(query: dict, given: dict) -> float:
-        """P(query | given), rounded to 6dp as conditional() tool returns."""
-        denom = _joint(given)
-        if denom < 1e-10:
-            return 0.0
-        return round(_joint({**query, **given}) / denom, 6)
-
-    def _marg(query: dict) -> float:
-        """P(query), rounded to 6dp as marginal() tool returns."""
-        return round(_joint(query), 6)
-
-    if problem_type in ("backdoor_empty", "backdoor_standard"):
-        Z = minimal_set or []
-
-        if not Z:
-            # ATE = P(Y=1|X=1) - P(Y=1|X=0)
-            ate = _cond({Y: 1}, {X: 1}) - _cond({Y: 1}, {X: 0})
-        else:
-            # Adjustment formula: ATE = Σ_z [P(Y=1|X=1,Z=z) - P(Y=1|X=0,Z=z)] * P(Z=z)
-            ate = 0.0
-            z_domains = [range(n_cats[z]) for z in Z]
-            for z_vals in itertools_product(*z_domains):
-                z_assign = dict(zip(Z, z_vals))
-                p_z = _marg(z_assign)
-                p_y1_x1_z = _cond({Y: 1}, {X: 1, **z_assign})
-                p_y1_x0_z = _cond({Y: 1}, {X: 0, **z_assign})
-                ate += (p_y1_x1_z - p_y1_x0_z) * p_z
-
-    elif problem_type == "frontdoor":
-        M = minimal_set or []
-        m_domains = [range(n_cats[m]) for m in M]
-        x_domain = range(n_cats[X])  # binary: {0, 1}
-
-        p_x = {x: _marg({X: x}) for x in x_domain}
-
-        def _e_y_do_x(x_val: int) -> float:
-            ey = 0.0
-            for m_vals in itertools_product(*m_domains):
-                m_assign = dict(zip(M, m_vals))
-                p_m_xv = _cond(m_assign, {X: x_val})
-                inner = sum(
-                    _cond({Y: 1}, {X: xp, **m_assign}) * p_x[xp]
-                    for xp in x_domain
-                )
-                ey += p_m_xv * inner
-            return ey
-
-        ate = _e_y_do_x(1) - _e_y_do_x(0)
-
-    else:
-        return None
-
-    return round(ate, 4)
+    return round(e_y_do_x(1) - e_y_do_x(0), 6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,9 +240,7 @@ def _build_problem_dict(
 ) -> dict:
     true_ate = None
     if problem_type != "not_identifiable":
-        true_ate = _compute_true_ate_via_tools(
-            X, Y, minimal_set or [], problem_type, cpts, n_cats, topo_order, parents_map
-        )
+        true_ate = _compute_true_ate_exact(X, Y, cpts, n_cats, topo_order, parents_map)
 
     optimal_turns = _compute_optimal_turns(problem_type)
 
@@ -427,11 +367,12 @@ def _try_sample_frontdoor(
 
     X and Y are sampled freely (path X→Y exists, no direct X→Y edge, Y is a sink).
     M_star = minimum node cut of G_desc gives the globally minimal set satisfying
-    condition 1. Edges into M_star from nodes that are not X, not in M_star, and
-    not descendants of X are removed — these are the only edges that can cause
-    conditions 2/3 to fail, and by minimality of M_star they are never on X→Y
-    paths (safe to remove). Frontdoor conditions are then verified as a sanity
-    check. Finally, the absence of a valid backdoor adjustment set is confirmed.
+    condition 1. External (non-X, non-descendant-of-X) incoming edges are removed
+    from M_star nodes and from every descendant-of-X ancestor of M_star (the full
+    X→M_star pathway). This eliminates every entry point that could violate
+    conditions 2 or 3 without touching any directed X→Y path or changing G_desc
+    (so M_star minimality is preserved). Frontdoor conditions are then verified as
+    a sanity check and the absence of a valid backdoor adjustment set is confirmed.
     """
 
     n = rng.randint(min_nodes, max_nodes)
@@ -471,7 +412,7 @@ def _try_sample_frontdoor(
     G_desc = G.subgraph(desc_of_X | {X, Y}).copy()
     try:
         M_star = nx.minimum_node_cut(G_desc, X, Y)
-    except Exception as e:
+    except Exception:
         return None
 
     k = len(M_star)
@@ -482,28 +423,55 @@ def _try_sample_frontdoor(
     if M_star & latent_nodes:
         return None
 
-    # Remove edges into M_star from nodes that are not X, not in M_star, and
-    # not descendants of X. By M_star minimality, such edges are never on any
-    # X→Y path, so condition 1 is preserved. These are the only edges that can
-    # cause conditions 2 or 3 to fail (an external non-descendant parent of
-    # m ∈ M_star would be an ancestor of X or unrelated to X, creating a
-    # backdoor path; a descendant-of-X parent of m cannot violate conditions 2/3
-    # without contradicting M_star minimality).
+    # Remove all external (non-X, non-descendant-of-X) incoming edges to both
+    # M_star nodes and every descendant-of-X ancestor of M_star (the full
+    # X → ... → M_star pathway).
+    #
+    # Why pathway nodes need the same treatment:
+    #   A descendant d ∈ desc(X) that is an ancestor of some m ∈ M_star and
+    #   has a non-descendant parent A (A → d) creates an active undirected path
+    #   X ← pa(X) → A → d → ... → m in the backdoor graph G_xbar, violating
+    #   condition 2.  The violation can occur at any depth (X → d1 → d2 → m
+    #   with A → d1), so the fix must cover all ancestors of M_star within
+    #   desc(X), not just M_star's direct parents.
+    #
+    # Why this is safe:
+    #   - Removed edges come from outside desc(X), so G_desc is unchanged and
+    #     M_star remains the minimum node cut (minimality / condition 1 preserved).
+    #   - All directed X→Y paths travel through desc(X); removing external
+    #     (non-descendant) edges into these nodes cannot cut any X→Y path.
+    #   - _check_frontdoor_conditions below verifies all three conditions hold.
+    anc_of_M_star = set()
     for m in M_star:
-        for parent in list(G.predecessors(m)):
-            if parent != X and parent not in M_star:
-                G.remove_edge(parent, m)
+        anc_of_M_star |= nx.ancestors(G, m)
+    pathway_nodes = (desc_of_X & anc_of_M_star) - M_star
+
+    for node in M_star | pathway_nodes:
+        for parent in list(G.predecessors(node)):
+            if parent != X and parent not in desc_of_X and parent not in M_star:
+                G.remove_edge(parent, node)
 
     # Sanity check: frontdoor conditions must hold after the above deletions.
     _fd_result = _check_frontdoor_conditions(G, X, Y, M_star)
     if _fd_result is not True:
         return None
 
+    # Sanity check: M_star must still be a minimum node cut in the updated graph.
+    # Edge removals should never touch G_desc (all removed edges come from outside
+    # desc(X)), but we verify explicitly to catch any unexpected regression.
+    G_desc_post = G.subgraph(desc_of_X | {X, Y}).copy()
+    try:
+        post_cut = nx.minimum_node_cut(G_desc_post, X, Y)
+    except Exception:
+        return None
+    if len(post_cut) != len(M_star):
+        return None
+
     # Verify no valid backdoor adjustment set exists among observed nodes.
     G_bd = _make_backdoor_graph(G, X)
     try:
         Z = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
-    except Exception as e:
+    except Exception:
         return None
     if Z is not None:
         return None
