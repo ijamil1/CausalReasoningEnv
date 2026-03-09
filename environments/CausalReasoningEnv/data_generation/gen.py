@@ -299,6 +299,16 @@ def _try_sample_backdoor(
     observed_nodes = set(nodes_list) - latent_nodes
 
     G_bd = _make_backdoor_graph(G, X)
+
+    if empty:
+        # X must have parents (non-trivial structure)
+        if G.in_degree(X) == 0:
+            return None
+        # Must have an undirected path in G_bd between X and Y;
+        # combined with d-separation given {}, this means paths exist but are collider-blocked
+        if not nx.has_path(G_bd.to_undirected(), X, Y):
+            return None
+
     try:
         min_set = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
     except Exception:

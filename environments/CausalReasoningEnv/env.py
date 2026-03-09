@@ -251,12 +251,14 @@ async def set_valid(info, state) -> float:
         info = json.loads(info)
     problem_type = info.get("problem_type", "")
 
-    if problem_type == "not_identifiable":
-        return 1.0  # no set needed; answer block checked by ate_accuracy
-
     declared_set = state.get("declared_set")
     if declared_set is None:
         return 0.0  # identifiable problem but no <set> tag declared
+    
+    if problem_type == "not_identifiable":
+        if len(declared_set) > 0:
+            return 0
+        return 1.0  # no set needed; answer block checked by ate_accuracy
 
     latent_nodes = set(info.get("latent_nodes", []))
     if any(n in latent_nodes for n in declared_set):
@@ -290,12 +292,15 @@ async def minimality(info, state) -> float:
     if isinstance(info, str):
         info = json.loads(info)
     problem_type = info.get("problem_type", "")
-    if problem_type == "not_identifiable":
-        return 1.0  # full credit; no set to minimize
+    
     # Gate on validity
     validity = await set_valid(info, state)
     if validity == 0.0:
         return 0.0
+    
+    if problem_type == "not_identifiable":
+        return 1.0  # full credit; no set to minimize
+    
     declared_set = state.get("declared_set") or []
     minimal_set = info.get("minimal_set")
     if minimal_set is None:
