@@ -631,7 +631,13 @@ def format_problem(p: dict) -> str:
         f"Outcome   (Y): Node {Y}"
     )
 
-    return dag_section + domain_section + footer
+    reminder = (
+        f"\n\nYour task: identify a minimal identification set for the ATE of X (Node {X}) on Y (Node {Y}), "
+        f"then use the probability query tools to compute the ATE. "
+        f"Follow the response format specified in the system prompt."
+    )
+
+    return dag_section + domain_section + footer + reminder
 
 
 def build_dataset(problems: list[dict]) -> Dataset:
