@@ -1,9 +1,9 @@
 """CausalATEEnv — two-turn StatefulToolEnv for ATE estimation.
 
-Turn 1 (declaration + tools): Model reasons about the DAG, writes a <set> tag,
-  and makes all needed tool calls in the same response.
-  - not_identifiable problems write <set></set><answer>not_identifiable</answer>
-    with no tool calls — end_of_phase fires immediately.
+Turn 1 (declaration + tools): Model reasons about the DAG, calls declare_set(nodes),
+  and makes all needed probability tool calls in the same response.
+  - not_identifiable problems call declare_set([]) with no probability tools —
+    env_response returns a Turn 2 prompt for <answer>not_identifiable</answer>.
   - If the declared set is invalid, env_response terminates the rollout immediately
     without offering Turn 2.
 Turn 2 (answer): Model receives tool results and writes <answer>ATE=...</answer>.
@@ -27,7 +27,7 @@ from networkx.algorithms.d_separation import is_d_separator
 
 from prompts import SYSTEM_PROMPT
 
-MAX_PARALLEL_TOOL_CALLS = 3  # frontdoor needs at most 3
+MAX_PARALLEL_TOOL_CALLS = 4  # declare_set + 3 probability tools (frontdoor)
 MAX_TURNS = 2                # declaration + tools / answer
 
 
@@ -151,29 +151,6 @@ def _parse_answer(messages: list) -> str | None:
     return None
 
 
-def _parse_set(messages: list) -> list[int] | None:
-    """Extract declared identification set from the first assistant message only.
-
-    Returns:
-        list[int]  — declared node IDs (may be empty for empty identification set)
-        None       — no <set> tag found in the first assistant message
-    """
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            set_m = re.search(r"<set>\s*(.*?)\s*</set>", content, re.DOTALL)
-            if set_m:
-                inner = set_m.group(1).strip()
-                if not inner or inner == "{}":
-                    return []  # empty identification set
-                return [
-                    int(x.strip()) for x in inner.split(",")
-                    if x.strip().lstrip("-").isdigit()
-                ]
-            return None  # first assistant message found but no <set> tag
-    return None  # no assistant messages
-
-
 def _reconstruct_graph(info: dict) -> nx.DiGraph:
     """Rebuild NetworkX DiGraph from stored edges in info dict."""
     G = nx.DiGraph()
@@ -240,7 +217,7 @@ async def terminated_too_many_parallel_tool_calls(completion) -> float:
 
 
 async def format_compliance(completion, info, state) -> float:
-    """0.5 if <set> tag present in first assistant turn, 0.5 if valid <answer> tag present."""
+    """0.5 if declare_set tool was called in Turn 1, 0.5 if valid <answer> tag present."""
     if isinstance(info, str):
         info = json.loads(info)
     score = 0.0
@@ -452,6 +429,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
             max_turns=MAX_TURNS,
             **kwargs,
         )
+        self.add_tool(self.declare_set)
         self.add_tool(marginal, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         self.add_tool(conditional, args_to_skip=["_cpts", "_domains", "_topo_order", "_parents_map", "_latent_nodes"])
         rubric.add_metric(terminated_too_many_parallel_tool_calls)
@@ -487,6 +465,16 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state["_latent_nodes"] = latent_nodes
         return state
 
+    async def declare_set(self, nodes: list) -> str:
+        """Declare the identification set for the ATE computation.
+        Call this in every Turn 1 response alongside your probability query tools.
+
+        Args:
+            nodes: List of observed node IDs in the identification set (e.g. ["2", "3"]).
+                   Pass an empty list [] for an empty adjustment set OR for not-identifiable. Node IDs should be passed as strings.
+        """
+        return f"The identification set you have declared: {nodes}"
+
     def update_tool_args(
         self,
         tool_name: str,
@@ -495,7 +483,9 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> dict:
-        """Inject per-rollout CPT state into every tool call."""
+        """Inject per-rollout CPT state into marginal/conditional tool calls."""
+        if tool_name not in ("marginal", "conditional"):
+            return tool_args
         args = dict(tool_args)
         args["_cpts"] = state["_cpts"]
         args["_domains"] = state["_domains"]
@@ -515,12 +505,12 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
         Turn 1 (declaration + tools):
           Valid continuation (return False — proceed to env_response):
-            tool calls present, no answer, <set> tag present.
+            declare_set tool called, no <answer> in text.
+            env_response handles both the identifiable path (probability calls present)
+            and the not_identifiable path (no probability calls).
           Stop (return True):
-            - no <set> tag → format error
-            - tool calls + answer → mutually exclusive, error
-            - no tool calls + no answer → incomplete response, error
-            - no tool calls + answer → valid early exit (e.g. not_identifiable); sets declared_set
+            - no declare_set call → format error
+            - <answer> tag in Turn 1 text → error (answer belongs in Turn 2)
         Turn 2 (answer): always stop.
         """
         trajectory = state.get("trajectory", [])
@@ -536,21 +526,18 @@ class CausalATEEnv(vf.StatefulToolEnv):
             return False
         content = last_assistant.get("content", "") or ""
         has_answer = bool(re.search(r"<answer>\s*.+?\s*</answer>", content, re.DOTALL))
-        has_tool_call = bool(last_assistant.get("tool_calls"))
-        has_set = bool(re.search(r"<set>.*?</set>", content, re.DOTALL))
+        tool_calls = last_assistant.get("tool_calls") or []
+        has_declare_set = any(
+            tc.get("function", {}).get("name") == "declare_set" for tc in tool_calls
+        )
         assistant_turn = sum(1 for m in messages if m.get("role") == "assistant")
 
         if assistant_turn == 1:
-            if not has_set:
-                return True  # error: missing <set> tag
-            if has_tool_call and has_answer:
-                return True  # error: tool calls and answer are mutually exclusive
-            if not has_tool_call and not has_answer:
-                return True  # error: incomplete — neither tool calls nor answer
-            if has_answer and not has_tool_call:
-                state["declared_set"] = _parse_set(messages)
-                return True  # valid early exit (not_identifiable)
-            return False  # valid: tool calls present, no answer → execute tools
+            if not has_declare_set:
+                return True  # error: declare_set was not called
+            if has_answer:
+                return True  # error: answer belongs in Turn 2, not Turn 1
+            return False  # proceed to env_response
 
         return True  # turn 2: always stop
 
@@ -560,20 +547,35 @@ class CausalATEEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> vf.Messages:
-        """Turn 1 only: parse declared set, validate set, enforce tool call limit, execute tools.
+        """Turn 1 only: extract declared set, validate, enforce tool call limit, execute tools.
 
-        Only reached when end_of_phase returned False (tool calls present, no answer,
-        <set> tag present). Turn 2 always stops via end_of_phase before reaching here.
+        Only reached when end_of_phase returned False (declare_set was called, no answer
+        in text). Handles both paths:
+          - Identifiable: probability tool calls present → validate set, execute tools, Turn 2.
+          - Not-identifiable: no probability calls → store set, return Turn 2 for answer.
+        Turn 2 always stops via end_of_phase before reaching here.
         """
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
         tool_calls = last_assistant.get("tool_calls", []) if last_assistant else []
 
-        # Parse and store declared set
-        state["declared_set"] = _parse_set(messages)
-
-        # Gate on set validity — terminate before executing any tools if invalid
+        # Extract declared_set from declare_set tool call args
+        declare_call = next(
+            (tc for tc in tool_calls if tc.get("function", {}).get("name") == "declare_set"),
+            None,
+        )
+        
+        try:
+            nodes_arg = json.loads(declare_call["function"]["arguments"])["nodes"]
+            state["declared_set"] = [int(n) for n in nodes_arg]
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            state["declared_set"] = None
+            termination = [{"role": "user", "content": "You have not properly declared an identification set. Rollout terminated."}]
+            state["final_env_response"] = termination
+            return termination
+            
+        
         info = state.get("info") or {}
         if isinstance(info, str):
             info = json.loads(info)
@@ -581,6 +583,30 @@ class CausalATEEnv(vf.StatefulToolEnv):
             termination = [{"role": "user", "content": "The identification set you declared is not valid. Rollout terminated."}]
             state["final_env_response"] = termination
             return termination
+
+        # Split into probability calls vs. declare_set
+        probability_calls = [
+            tc for tc in tool_calls
+            if tc.get("function", {}).get("name") in ("marginal", "conditional")
+        ]
+
+        # Not-identifiable path: no probability tools — provide Turn 2 for answer
+        if not probability_calls:
+            turn2 = []
+            # Must include a tool result for declare_set before the next user message
+            if declare_call and declare_call.get("id"):
+                turn2.append({
+                    "role": "tool",
+                    "tool_call_id": declare_call["id"],
+                    "content": f"The identification set you have declared: {nodes_arg}",
+                })
+            turn2.append({"role": "user", "content": (
+                "No probability queries were made.  You MUST end your response with exactly one: <answer>ATE=...</answer> tag OR "
+                "<answer>not_identifiable</answer>. Do NOT make any more tool calls."
+            )})
+            return turn2
+
+        
 
         # Enforce parallel tool call limit
         if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:

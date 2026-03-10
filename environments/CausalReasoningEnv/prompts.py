@@ -11,7 +11,13 @@ You will be given a causal DAG (directed acyclic graph) with:
   • The domain (possible values) of each node. Treatment X and outcome Y are always binary.
   • The treatment node X and outcome node Y.
 
-You have access to two probability query tools backed by exact CPT enumeration:
+You have access to three tools:
+
+  declare_set(nodes)
+    Declares the minimal identification set you have determined for the ATE computation.
+    Input:  nodes — list of observed node IDs as strings (e.g. ["2", "3"]).
+            Pass an empty list [] for an empty adjustment set OR for not-identifiable.
+    REQUIRED: Call this in every Turn 1 response.
 
   marginal(variables)
     Returns the full joint PMF P(V1, V2, ...) for all value combinations of the given variables.
@@ -35,8 +41,9 @@ TASK
 You have exactly 2 turns to:
 
   1. Reason about the causal structure to determine the minimal identification set for computing the Average Treatment Effect (ATE) of X on Y.
-  2. Write exactly one <set> tag (REQUIRED) AND make all needed tool calls in the same response —
-     UNLESS the ATE is not identifiable, in which case write <set></set> AND <answer>not_identifiable</answer> with no tool calls.
+  2. Call declare_set(nodes) with your identification set AND make all needed probability tool calls
+     in the same response — UNLESS the ATE is not identifiable, in which case call declare_set([])
+     with no probability tool calls (you will be prompted for your answer in Turn 2).
   3. Compute and report the ATE given the results of the tool calls.
 
 You will be scored on the validity of the identification set, the minimality of the identification set, and the accuracy of your ATE answer.
@@ -45,57 +52,66 @@ Your score will suffer if you do not follow the specified format for your respon
 RESPONSE FORMAT
 ───────────────
 Turn 1 — Declaration + Tool calls (single response):
-  Reason about the DAG, then write exactly one <set> tag AND make all needed tool calls in the
-  same response — UNLESS the ATE is not identifiable (see EXCEPTION below).
+  Reason about the DAG, analyze the causal structure, and determine the minimal identification set. Then, call declare_set AND make all needed probability tool calls in
+  the same response. For not-identifiable cases, call declare_set([]) only (no probability tools).
 
   Example 1 (identifiable and non-empty identification set):
     <reasoning>
     [Analyze the causal structure and determine the minimal identification set.]
     </reasoning>
-    <set>2, 3</set>
-    [call tools via the tool-calling interface]
-  
+    [call declare_set(["2", "3"]) + probability tools via the tool-calling interface]
+
   Example 2 (identifiable and empty identification set):
     <reasoning>
     [Analyze the causal structure and determine the minimal identification set.]
     </reasoning>
-    <set></set>
-    [call tools via the tool-calling interface]
+    [call declare_set([]) + probability tools via the tool-calling interface]
 
-  Example 3 - EXCEPTION (not identifiable; write BOTH set and answer tags and do NOT use tool calls):
+  Example 3 (not identifiable — call declare_set([]) only, no probability tools):
     <reasoning>
     [Explain why the ATE cannot be identified.]
     </reasoning>
-    <set></set>
-    <answer>not_identifiable</answer>
-
-  WARNING: <set></set> alone is NOT a complete response in either Example 2 or Example 3.
+    [call declare_set([]) via the tool-calling interface — do NOT call marginal or conditional]
 
   Rules for Turn 1:
     • Leverage your expertise and reason about the DAG and the causal structure to determine a minimal identification set. Do not include X or Y in the identification set.
-    • Once you've determined a minimal identification set, include it in inside a <set> tag. This is REQUIRED in every Turn 1 response.
-    • Tool calls and <answer> tags are MUTUALLY EXCLUSIVE — use tool calls for identifiable cases,
-      use <answer>not_identifiable</answer> (no tool calls) for the not-identifiable exception.
-    • Make all needed tool calls in parallel (up to a maximum of 3).
-    • Calling more than 3 tools in parallel will result in an error and rollout termination.
-    • Do not query latent nodes in your tool calls — they will return an error.
+    • Call declare_set(nodes) with your identification set. This is REQUIRED in every Turn 1 response.
+    • For identifiable cases, call declare_set AND the needed probability tools (marginal/conditional) in the same response.
+    • For not-identifiable cases, call declare_set([]) only — do NOT call marginal or conditional.
+    • Make all needed tool calls in parallel (up to a maximum of 4).
+    • Calling more than 4 tools in parallel will result in an error and rollout termination.
+    • Do not query latent nodes in your probability tool calls — they will return an error.
+    • Do NOT write an <answer> tag in Turn 1.
 
 Turn 2 — Final answer:
   After receiving tool results, reason and then write exactly one final answer:
 
-  Example:
+  Example (identifable ATE):
     <reasoning>
     [Reason about the results of the tool calls and compute the ATE.]
     </reasoning>
     <answer>ATE=0.2714</answer>
-  Report ATE rounded to 4 decimal places.
+  
+  Example (non-identifiable ATE):
+    <reasoning>
+    [Your reasoning ... ]
+    </reasoning>
+    <answer>not_identifiable</answer>
 
   Rules for Turn 2:
-    • Reason about the results of your tool calls / the returned probabilties and compute the ATE. Round ATE to 4 decimal places and include your answer in an <answer> tag (ie: <answer>ATE=0.2714</answer>).
+    If ATE is identifiable:
+      • Reason about the results of your tool calls and compute the ATE. 
+      • Round ATE to 4 decimal places and include your answer in an <answer> tag (ie: <answer>ATE=0.2714</answer>).
+    If ATE is NOT identifiable:
+      • Include not_identifiable in answer tags (ie: <answer>not_identifiable</answer>)
     • Write exactly one <answer> tag. Do NOT make any tool calls.
 
 TOOL USAGE EXAMPLES
 ────────────────────
+To declare identification set {2, 3}:
+  declare_set(["2", "3"])
+  returns -> Identification set declared: ['2', '3']
+
 To compute P(node2, node3) for all value combinations:
   marginal(["2", "3"])
   returns -> P(node2=0, node3=0) = 0.3211
@@ -111,5 +127,5 @@ To compute P(node4 | node0) marginalizing over everything else:
   returns -> P(node4=0 | node0=0) = 0.5512
     P(node4=1 | node0=0) = 0.4488  ...
 
-Make all needed calls in parallel (up to a maximum of 3).
+Make all needed calls in parallel (up to a maximum of 4).
 """

@@ -14,9 +14,9 @@ This repo builds a **causal reasoning benchmark** and paired RL training environ
 
 The environment implements a two-phase rollout over CPT-based DAGs:
 
-**Phase 1 (declaration):** Model reasons about the DAG and writes `<set>…</set>` to declare its identification set — scored independently of computation.
+**Phase 1 (declaration):** Model reasons about the DAG and calls `declare_set(nodes)` to declare its identification set — scored independently of computation. For not-identifiable cases, model calls `declare_set([])` with no probability tools; env provides Turn 2 for `<answer>not_identifiable</answer>`.
 
-**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 3 tool calls (optimal max is 3 for frontdoor). If the declared set is invalid, `env_response` terminates the rollout immediately without offering Phase 2.
+**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 4 tool calls total (declare_set + 3 probability tools for frontdoor). If the declared set is invalid, `env_response` terminates the rollout immediately without offering Phase 2.
 
 ### Problem Types
 
@@ -48,7 +48,8 @@ Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](Caus
 
 ### Tools for CausalReasoningEnv
 
-Two probability query tools are exposed to the model via `StatefulToolEnv`. Per-rollout CPT state is injected via `update_tool_args` (hidden from the model schema):
+Three tools are exposed to the model via `StatefulToolEnv`. Per-rollout CPT state is injected via `update_tool_args` (hidden from the model schema) for probability tools only:
+- `declare_set(nodes)` — declares the identification set; called in every Turn 1 response alongside probability tools (or alone for not-identifiable cases)
 - `marginal(variables)` — returns the full joint PMF P(V1, V2, ...) for given observed variables
 - `conditional(query, given)` — returns the full conditional PMF P(query | given) for all strata
 
