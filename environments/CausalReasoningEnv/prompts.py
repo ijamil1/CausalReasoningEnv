@@ -35,31 +35,37 @@ TASK
 You have exactly 2 turns to:
 
   1. Reason about the causal structure to determine the minimal identification set for computing the Average Treatment Effect (ATE) of X on Y.
-  2. Declare your identification set and make all needed tool calls in the same response.
+  2. Write exactly one <set> tag (REQUIRED) AND make all needed tool calls in the same response —
+     UNLESS the ATE is not identifiable, in which case write <set></set> AND <answer>not_identifiable</answer> with no tool calls.
   3. Compute and report the ATE given the results of the tool calls.
 
-You will be scored on the validity of the identifiation set, the minimality of the identification set, and the accuracy of your ATE answer.
+You will be scored on the validity of the identification set, the minimality of the identification set, and the accuracy of your ATE answer.
 Your score will suffer if you do not follow the specified format for your responses for each turn. See below for the expected format.
 
 RESPONSE FORMAT
 ───────────────
 Turn 1 — Declaration + Tool calls (single response):
-  Reason about the DAG, then write exactly one <set> tag AND make all needed tool calls
-  in the same response. Tool calls and the <set> tag are required together.
-    <set>2, 3</set>   <- identification set {node2, node3}
-    <set>{}</set>      <- empty identification set (no confounding on X→Y)
-    <set></set>        <- ATE is not identifiable from observational data
+  Reason about the DAG, then write exactly one <set> tag AND make all needed tool calls in the
+  same response — UNLESS the ATE is not identifiable (see EXCEPTION below).
 
-  If the ATE is not identifiable, skip tool calls and write your final answer instead:
+    <set>2, 3</set>   <- non-empty identification set {node2, node3}; follow with tool calls
+    <set></set>        <- empty identification set (no confounders on X→Y); follow with tool calls
+    <set></set>        <- [EXCEPTION] not identifiable; follow with <answer>not_identifiable</answer> instead
+
+  EXCEPTION — not identifiable: write BOTH of the following and NO tool calls:
     <set></set>
     <answer>not_identifiable</answer>
+    
+  WARNING: <set></set> alone is NOT a complete response in either case. If you believe the DAG implies an empty identification set, follow the set tags with tool calls. If you believe the ATE is not identifiable, follow the set tags with <answer>not_identifiable</answer>.
 
   Rules for Turn 1:
     • The <set> tag is REQUIRED in every Turn 1 response. Do not include X or Y in the identification set.
-    • Tool calls and <answer> tags are MUTUALLY EXCLUSIVE — use one or the other, never both.
+    • Tool calls and <answer> tags are MUTUALLY EXCLUSIVE — use tool calls for identifiable cases,
+      use <answer>not_identifiable</answer> (no tool calls) for the not-identifiable exception.
     • Make all needed tool calls in parallel (up to a maximum of 3).
     • Calling more than 3 tools in parallel will result in an error and rollout termination.
     • Do not query latent nodes — they will return an error.
+    • Do NOT write tool calls as JSON or XML in your response text — use only the tool-calling interface.
 
 Turn 2 — Final answer:
   After receiving tool results, reason and then write exactly one final answer:
