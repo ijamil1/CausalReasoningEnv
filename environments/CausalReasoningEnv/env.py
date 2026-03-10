@@ -239,11 +239,15 @@ async def terminated_too_many_parallel_tool_calls(completion) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def format_compliance(completion, state) -> float:
+async def format_compliance(completion, info, state) -> float:
     """0.5 if <set> tag present in first assistant turn, 0.5 if valid <answer> tag present."""
+    if isinstance(info, str):
+        info = json.loads(info)
     score = 0.0
     if state.get("declared_set") is not None:
         score += 0.5
+        if not _is_valid_set(state.get("declared_set"), info):
+            return 1
     answer = _parse_answer(completion)
     if answer == "not_identifiable" or (answer and re.match(r"^ATE=[-+]?\d+(\.\d+)?$", answer)):
         score += 0.5
