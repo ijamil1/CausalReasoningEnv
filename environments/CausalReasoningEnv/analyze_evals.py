@@ -9,11 +9,17 @@ For each results.jsonl found under the evals directory, prints:
   - Breakdown by problem_type
 
 Conditional metric definitions:
-  set_valid   | format_compliance > 0       : validity when a set tag was declared
-  minimality  | set_valid == 1              : minimality when set is valid
-  proc_correct| set_valid == 1              : tool-call correctness when set is valid
-  ate_accuracy| process_correctness == 1    : ATE correctness when process is correct
-               AND format_compliance == 1     (also implies answer tag was present)
+  set_tag_cpl  (raw)             : <set> tag in first turn (parsed from completion)
+  ans_tag_cpl  | set_valid == 1  : answer tag present when set was valid
+  set_valid    | set_tag_cpl==1  : validity when a set tag was declared
+  minimality   | set_valid == 1  : minimality when set is valid
+  proc_correct | set_valid == 1  : tool-call correctness when set is valid
+  ate_accuracy | pc==1 & fc==1   : ATE correctness when process correct + answer present
+
+Note on set_tag_cpl: parsed directly from completion because state["declared_set"] is
+never set (format_compliance = 0) for rollouts where the model wrote a set tag but also
+wrote both tool calls + answer, or neither — those are answer/tool-call format failures,
+not set tag failures.
 
 Also saves a timestamped CSV with one row per (model_run, problem_type).
 """
@@ -21,6 +27,7 @@ Also saves a timestamped CSV with one row per (model_run, problem_type).
 import argparse
 import csv
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +39,8 @@ DEFAULT_EVALS_DIR = Path(__file__).parent / "outputs" / "evals"
 CSV_COLS = [
     "model_run", "problem_type", "n", "reward",
     "format_compliance", "set_valid", "minimality", "process_correctness", "ate_accuracy",
+    "set_tag_cpl",
+    "ans_tag_cpl_cond", "ans_tag_cpl_n",
     "set_valid_cond", "set_valid_cond_n",
     "minimality_cond", "minimality_cond_n",
     "proc_correct_cond", "proc_correct_cond_n",
@@ -42,6 +51,14 @@ CSV_COLS = [
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loading
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _has_set_tag(completion: list) -> bool:
+    """Return True if the first assistant message contains a <set>…</set> tag."""
+    for msg in completion:
+        if msg.get("role") == "assistant":
+            return bool(re.search(r"<set>.*?</set>", msg.get("content") or "", re.DOTALL))
+    return False
 
 
 def load_rows(jsonl_path: Path) -> list[dict]:
@@ -62,6 +79,8 @@ def load_rows(jsonl_path: Path) -> list[dict]:
                 except json.JSONDecodeError:
                     info = {}
             row["_problem_type"] = info.get("problem_type", "unknown")
+            completion = row.get("completion") or []
+            row["_has_set_tag"] = 1.0 if _has_set_tag(completion) else 0.0
             rows.append(row)
     return rows
 
@@ -100,11 +119,17 @@ def compute_stats(rows: list[dict]) -> dict:
     aa = [_f(r, "ate_accuracy") for r in rows]
     rw = [_f(r, "reward") for r in rows]
 
-    fmt_ok      = [f > 0        for f in fc]
+    hst = [_f(r, "_has_set_tag") for r in rows]  # 1.0 if <set> tag in first turn
+
+    stc_ok      = [h == 1.0     for h in hst]
     sv_ok       = [s == 1.0     for s in sv]
     pc_and_fc   = [p == 1.0 and f == 1.0 for p, f in zip(pc, fc)]
 
-    sv_cond,  sv_n  = _cond_mean(sv, fmt_ok)
+    # answer_tag_compliance: when set was valid, format_compliance == 1.0 means answer present
+    atc = [1.0 if f == 1.0 else 0.0 for f in fc]
+    atc_cond, atc_n = _cond_mean(atc, sv_ok)
+
+    sv_cond,  sv_n  = _cond_mean(sv, stc_ok)
     mi_cond,  mi_n  = _cond_mean(mi, sv_ok)
     pc_cond,  pc_n  = _cond_mean(pc, sv_ok)
     aa_cond,  aa_n  = _cond_mean(aa, pc_and_fc)
@@ -117,6 +142,9 @@ def compute_stats(rows: list[dict]) -> dict:
         "minimality":           _mean(mi),
         "process_correctness":  _mean(pc),
         "ate_accuracy":         _mean(aa),
+        "set_tag_cpl":          _mean(hst),
+        "ans_tag_cpl_cond":     atc_cond,
+        "ans_tag_cpl_n":        atc_n,
         "set_valid_cond":       sv_cond,
         "set_valid_cond_n":     sv_n,
         "minimality_cond":      mi_cond,
@@ -161,15 +189,17 @@ PT_LABELS = {
 
 def _print_overall(stats: dict) -> None:
     rows = [
-        ("metric",               "raw",                                   "conditional (N)"),
-        ("—" * 22,               "—" * 8,                                 "—" * 18),
-        ("format_compliance",    _fv(stats["format_compliance"]),          "—"),
-        ("set_valid",            _fv(stats["set_valid"]),                  _fc(stats["set_valid_cond"],    stats["set_valid_cond_n"])),
-        ("minimality",           _fv(stats["minimality"]),                 _fc(stats["minimality_cond"],   stats["minimality_cond_n"])),
-        ("process_correctness",  _fv(stats["process_correctness"]),        _fc(stats["proc_correct_cond"], stats["proc_correct_cond_n"])),
-        ("ate_accuracy",         _fv(stats["ate_accuracy"]),               _fc(stats["ate_acc_cond"],      stats["ate_acc_cond_n"])),
-        ("—" * 22,               "—" * 8,                                 "—" * 18),
-        ("reward",               _fv(stats["reward"]),                     "—"),
+        ("metric",               "raw",                                    "conditional (N)"),
+        ("—" * 22,               "—" * 8,                                  "—" * 22),
+        ("format_compliance",    _fv(stats["format_compliance"]),           "—"),
+        ("  set_tag_cpl",        _fv(stats["set_tag_cpl"]),                 "—"),
+        ("  ans_tag_cpl",        "—",                                       _fc(stats["ans_tag_cpl_cond"],  stats["ans_tag_cpl_n"]) + "  [sv=1]"),
+        ("set_valid",            _fv(stats["set_valid"]),                   _fc(stats["set_valid_cond"],    stats["set_valid_cond_n"]) + "  [stc=1]"),
+        ("minimality",           _fv(stats["minimality"]),                  _fc(stats["minimality_cond"],   stats["minimality_cond_n"]) + "  [sv=1]"),
+        ("process_correctness",  _fv(stats["process_correctness"]),         _fc(stats["proc_correct_cond"], stats["proc_correct_cond_n"]) + "  [sv=1]"),
+        ("ate_accuracy",         _fv(stats["ate_accuracy"]),                _fc(stats["ate_acc_cond"],      stats["ate_acc_cond_n"]) + "  [pc=1,fc=1]"),
+        ("—" * 22,               "—" * 8,                                  "—" * 22),
+        ("reward",               _fv(stats["reward"]),                      "—"),
     ]
     col_w = [max(len(r[i]) for r in rows) for i in range(3)]
     for r in rows:
@@ -195,12 +225,14 @@ def _print_by_type(by_type: dict[str, dict]) -> None:
             line += f"  {cell:<{col_w}}"
         print(line)
 
-    row("n (rollouts)",          "n")
-    row("reward (raw)",          "reward")
+    row("n (rollouts)",              "n")
+    row("reward (raw)",              "reward")
     print()
-    row("format_compliance",     "format_compliance")
-    row("set_valid (raw)",       "set_valid")
-    row("set_valid (cond|fc>0)", None, "set_valid_cond",    "set_valid_cond_n")
+    row("format_compliance",         "format_compliance")
+    row("  set_tag_cpl (raw)",       "set_tag_cpl")
+    row("  ans_tag_cpl (cond|sv=1)", None, "ans_tag_cpl_cond", "ans_tag_cpl_n")
+    row("set_valid (raw)",           "set_valid")
+    row("set_valid (cond|stc=1)",    None, "set_valid_cond",    "set_valid_cond_n")
     print()
     row("minimality (raw)",      "minimality")
     row("minimality (cond|sv=1)","minimality",  "minimality_cond",   "minimality_cond_n")
