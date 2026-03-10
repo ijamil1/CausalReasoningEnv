@@ -248,6 +248,8 @@ async def format_compliance(completion, info, state) -> float:
         score += 0.5
         if not _is_valid_set(state.get("declared_set"), info):
             return 1
+    else:
+        return 0
     answer = _parse_answer(completion)
     if answer == "not_identifiable" or (answer and re.match(r"^ATE=[-+]?\d+(\.\d+)?$", answer)):
         score += 0.5
