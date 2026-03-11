@@ -106,9 +106,7 @@ async def conditional(
 ) -> str:
     """Return P(query | given) for all conditioning strata.
 
-    One line per (query-value, given-stratum) combination, except the largest
-    query domain value per stratum is omitted. The omitted probability equals
-    1 minus the sum of the listed values for that stratum.
+    One line per conditioning stratum, listing all query values inline.
 
     Args:
         query: List of node IDs (strings) for the query variables.
@@ -120,23 +118,25 @@ async def conditional(
         if v in _latent_nodes:
             return f"Error: node {v} is latent and not observable."
     lines = []
+    query_node_str = ",".join(f"node{v}" for v in int_query)
     all_query_vals = list(itertools_product(*[range(len(_domains[v])) for v in int_query]))
-    query_vals_to_show = all_query_vals[:-1]  # omit largest-indexed query value per stratum
     for given_vals in itertools_product(*[range(len(_domains[v])) for v in int_given]):
         given_assignments = dict(zip(int_given, given_vals))
         denom = _joint_marginal(given_assignments, _cpts, _domains, _topo_order, _parents_map)
         given_str = ",".join(f"node{v}={val}" for v, val in zip(int_given, given_vals))
         if denom < 1e-10:
-            lines.append(f"P(... | {given_str}) = undefined (zero probability)")
+            lines.append(f"P({query_node_str} | {given_str}) = undefined (zero probability)")
             continue
-        for query_vals in query_vals_to_show:
+        probs = []
+        for query_vals in all_query_vals:
             query_assignments = dict(zip(int_query, query_vals))
             numer = _joint_marginal(
                 {**query_assignments, **given_assignments},
                 _cpts, _domains, _topo_order, _parents_map,
             )
             query_str = ",".join(f"node{v}={val}" for v, val in zip(int_query, query_vals))
-            lines.append(f"P({query_str} | {given_str}) = {round(numer / denom, 4)}")
+            probs.append(f"P({query_str}|given)={round(numer / denom, 4)}")
+        lines.append(f"P({query_node_str} | {given_str}): {', '.join(probs)}")
     return "\n".join(lines)
 
 

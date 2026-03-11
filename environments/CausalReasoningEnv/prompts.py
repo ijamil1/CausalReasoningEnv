@@ -31,13 +31,10 @@ You have access to three tools:
     Returns P(query | given) for all conditioning strata.
     Input:  query — list of node IDs for the query variables.
             given — list of node IDs for the conditioning variables.
-    Output: one line per (query-value, given-stratum) combination, EXCEPT the largest
-            query domain value per stratum is omitted:
-            P(node4=0 | node0=0, node2=0) = 0.7234
-            P(node4=0 | node0=0, node2=1) = 0.3105  ...
-    Omitted value: P(node4=largest | stratum) = 1 − sum of listed values for that stratum.
-            e.g. binary node4 {0,1}: P(node4=1|...) = 1 − P(node4=0|...)
-            e.g. ternary node4 {0,1,2}: P(node4=2|...) = 1 − P(node4=0|...) − P(node4=1|...)
+    Output: one line per conditioning stratum listing all query-value probabilities inline.
+            "given" refers to the stratum shown at the start of each line:
+            P(node4 | node0=0,node2=0): P(node4=0|given)=0.7234, P(node4=1|given)=0.2766
+            P(node4 | node0=0,node2=1): P(node4=0|given)=0.3105, P(node4=1|given)=0.6895  ...
     Note:   latent nodes in either list return an error.
 
 TASK
@@ -123,23 +120,13 @@ To compute P(node2, node3) for all value combinations:
 
 To compute P(node4 | node0, node2) for all strata (binary node4 {0,1}):
   conditional(["4"], ["0", "2"])
-  returns -> P(node4=0 | node0=0,node2=0) = 0.7234
-    P(node4=0 | node0=0,node2=1) = 0.3105  ...
-  (node4=1 omitted per stratum; P(node4=1|...) = 1 − P(node4=0|...))
-
-To compute P(node4 | node0) marginalizing over everything else (binary node4 {0,1}):
-  conditional(["4"], ["0"])
-  returns -> P(node4=0 | node0=0) = 0.5512
-    P(node4=0 | node0=1) = 0.4488  ...
-  (node4=1 omitted; P(node4=1|...) = 1 − P(node4=0|...))
+  returns -> P(node4 | node0=0,node2=0): P(node4=0|given)=0.7234, P(node4=1|given)=0.2766
+    P(node4 | node0=0,node2=1): P(node4=0|given)=0.3105, P(node4=1|given)=0.6895  ...
 
 To compute P(node3 | node0) for a ternary node3 {0,1,2}:
   conditional(["3"], ["0"])
-  returns -> P(node3=0 | node0=0) = 0.2910
-    P(node3=1 | node0=0) = 0.4320
-    P(node3=0 | node0=1) = 0.3541
-    P(node3=1 | node0=1) = 0.3012  ...
-  (node3=2 omitted per stratum; P(node3=2|...) = 1 − P(node3=0|...) − P(node3=1|...))
+  returns -> P(node3 | node0=0): P(node3=0|given)=0.2910, P(node3=1|given)=0.4320, P(node3=2|given)=0.2770
+    P(node3 | node0=1): P(node3=0|given)=0.3541, P(node3=1|given)=0.3012, P(node3=2|given)=0.3447  ...
 
 Make all needed calls in parallel (up to a maximum of 4).
 """
