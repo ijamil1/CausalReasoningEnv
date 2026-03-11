@@ -225,6 +225,8 @@ async def format_compliance(completion, info, state) -> float:
         score += 0.5
         if not _is_valid_set(state.get("declared_set"), info):
             return 1
+        if not state['has_required_tool_calls']:
+            return 1
     else:
         return 0
     answer = _parse_answer(completion)
@@ -638,7 +640,24 @@ class CausalATEEnv(vf.StatefulToolEnv):
             if tc.get("function", {}).get("name") in ("marginal", "conditional")
         ]
 
-        # Not-identifiable path: no probability tools — provide Turn 2 for answer
+        # Terminate if required probability calls are missing (handles all cases,
+        # including 0-call not_identifiable vs. identifiable with wrong/missing calls)
+        if not _has_required_calls(probability_calls, info, state.get("declared_set") or []):
+            state['has_required_tool_calls'] = False
+            termination = [
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": "Rollout terminated: required probability queries for the declared identification set and implied identification approach were not made.",
+                }
+                for tc in tool_calls
+                if tc.get("id")
+            ]
+            state["final_env_response"] = termination
+            return termination
+        state['has_required_tool_calls'] = True
+        # No probability calls and _has_required_calls passed → not-identifiable declared correctly
+        # Provide Turn 2 for the final answer
         if not probability_calls:
             turn2 = []
             # Must include a tool result for declare_set before the next user message
@@ -653,22 +672,6 @@ class CausalATEEnv(vf.StatefulToolEnv):
                 "<answer>not_identifiable</answer>. Do NOT make any more tool calls."
             )})
             return turn2
-
-        
-
-        # Terminate if required probability calls are missing (saves tool execution tokens)
-        if not _has_required_calls(probability_calls, info, state.get("declared_set") or []):
-            termination = [
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": "Rollout terminated: required probability queries for the declared identification set were not made.",
-                }
-                for tc in tool_calls
-                if tc.get("id")
-            ]
-            state["final_env_response"] = termination
-            return termination
 
         # Enforce parallel tool call limit
         if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:
