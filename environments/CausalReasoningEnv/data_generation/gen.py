@@ -633,7 +633,7 @@ def format_problem(p: dict) -> str:
 
     reminder = (
         f"\n\nYour task: identify a minimal identification set and compute the ATE of X (Node {X}) on Y (Node {Y})\n"
-        f"Follow the response format specified in the system prompt."
+        f"Follow the instructions and response format specified in the system prompt."
     )
 
     return dag_section + domain_section + footer + reminder

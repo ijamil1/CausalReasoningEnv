@@ -302,6 +302,54 @@ async def minimality(info, state) -> float:
     return min(1.0, k / declared_size)
 
 
+def _has_required_calls(prob_tool_calls: list, info: dict, declared_set: list) -> bool:
+    """Return True if all required probability tool calls are present in prob_tool_calls.
+
+    Uses the same lenient logic as process_correctness: extra calls are ignored,
+    only all expected calls must be present. For not_identifiable, no prob calls
+    are expected so any prob call returns False.
+    """
+    X, Y = str(info["X"]), str(info["Y"])
+    Z = [str(n) for n in (declared_set or [])]
+    problem_type = info.get("problem_type", "")
+
+    if problem_type == "not_identifiable":
+        return len(prob_tool_calls) == 0
+    elif problem_type in ("backdoor_empty", "backdoor_standard") and not declared_set:
+        expected = [("conditional", frozenset([Y]), frozenset([X]))]
+    elif problem_type in ("backdoor_empty", "backdoor_standard"):
+        expected = [
+            ("marginal", frozenset(Z)),
+            ("conditional", frozenset([Y]), frozenset([X] + Z)),
+        ]
+    elif problem_type == "frontdoor":
+        expected = [
+            ("marginal", frozenset([X])),
+            ("conditional", frozenset(Z), frozenset([X])),
+            ("conditional", frozenset([Y]), frozenset(Z + [X])),
+        ]
+    else:
+        return False
+
+    actual = []
+    for tc in prob_tool_calls:
+        name = tc.get("function", {}).get("name", "")
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except (KeyError, json.JSONDecodeError):
+            continue
+        if name == "marginal":
+            actual.append(("marginal", frozenset(str(v) for v in args.get("variables", []))))
+        elif name == "conditional":
+            actual.append((
+                "conditional",
+                frozenset(str(v) for v in args.get("query", [])),
+                frozenset(str(v) for v in args.get("given", [])),
+            ))
+
+    return all(any(a == e for a in actual) for e in expected)
+
+
 async def process_correctness(completion, info, state) -> float:
     """1.0 if the model made exactly the expected tool calls given the declared set and problem type.
 
@@ -607,6 +655,20 @@ class CausalATEEnv(vf.StatefulToolEnv):
             return turn2
 
         
+
+        # Terminate if required probability calls are missing (saves tool execution tokens)
+        if not _has_required_calls(probability_calls, info, state.get("declared_set") or []):
+            termination = [
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": "Rollout terminated: required probability queries for the declared identification set were not made.",
+                }
+                for tc in tool_calls
+                if tc.get("id")
+            ]
+            state["final_env_response"] = termination
+            return termination
 
         # Enforce parallel tool call limit
         if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:

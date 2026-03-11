@@ -40,7 +40,7 @@ TASK
 ────
 You have exactly 2 turns to:
 
-  1. Reason about the causal structure to determine the minimal identification set for computing the Average Treatment Effect (ATE) of X on Y.
+  1. Reason about the causal structure to determine: (a) an identification approach, (b) the minimal identification set for that approach, and (c) the probability queries required to compute the ATE given the approach and set.
   2. Call declare_set(nodes) with your identification set AND make all needed probability tool calls
      in the same response — UNLESS the ATE is not identifiable, in which case call declare_set([])
      with no probability tool calls (you will be prompted for your answer in Turn 2).
@@ -52,35 +52,36 @@ Your score will suffer if you do not follow the specified format for your respon
 RESPONSE FORMAT
 ───────────────
 Turn 1 — Declaration + Tool calls (single response):
-  Reason about the DAG, analyze the causal structure, and determine the minimal identification set. Then, call declare_set AND make all needed probability tool calls in
+  Think about the DAG, analyze the causal structure, and reason about identification approaches to determine the minimal identification set. Then, call declare_set AND make all needed probability tool calls in
   the same response. For not-identifiable cases, call declare_set([]) only (no probability tools).
 
   Example 1 (identifiable and non-empty identification set):
     <reasoning>
-    [Analyze the causal structure and determine the minimal identification set.]
+    [Analyze the causal structure. Determine an identification approach, derive the minimal identification set, and specify the probability queries that approach requires to compute the ATE.]
     </reasoning>
     [call declare_set(["2", "3"]) + probability tools via the tool-calling interface]
 
   Example 2 (identifiable and empty identification set):
     <reasoning>
-    [Analyze the causal structure and determine the minimal identification set.]
+    [Analyze the causal structure. Determine an identification approach, derive the minimal identification set, and specify the probability queries that approach requires to compute the ATE.]
     </reasoning>
     [call declare_set([]) + probability tools via the tool-calling interface]
 
   Example 3 (not identifiable — call declare_set([]) only, no probability tools):
     <reasoning>
-    [Explain why the ATE cannot be identified.]
+    [Analyze the causal structure. Explain why the ATE cannot be identified.]
     </reasoning>
     [call declare_set([]) via the tool-calling interface — do NOT call marginal or conditional]
 
   Rules for Turn 1:
-    • Leverage your expertise and reason about the DAG and the causal structure to determine a minimal identification set. Do not include X or Y in the identification set.
-    • Call declare_set(nodes) with your identification set. This is REQUIRED in every Turn 1 response.
+    • Leverage your expertise and reason about the DAG, identification approaches, and the causal structure to determine a minimal identification set. Do not include X or Y in the identification set.
+    • Call declare_set(nodes) with your identification set. This is REQUIRED in every Turn 1 response. You do NOT need to specify the identification approach.
     • For identifiable cases, call declare_set AND the needed probability tools (marginal/conditional) in the same response.
     • For not-identifiable cases, call declare_set([]) only — do NOT call marginal or conditional.
     • Make all needed tool calls in parallel (up to a maximum of 4).
     • Calling more than 4 tools in parallel will result in an error and rollout termination.
     • Do not query latent nodes in your probability tool calls — they will return an error.
+    • If you call probability tool calls, they should correspond to the queries required by your identification approach and declared set — do not make queries unrelated to your approach.
     • Do NOT write an <answer> tag in Turn 1.
 
 Turn 2 — Final answer:
