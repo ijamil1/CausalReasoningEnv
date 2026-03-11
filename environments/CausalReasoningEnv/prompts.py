@@ -28,12 +28,16 @@ You have access to three tools:
     Note:   latent nodes in the list return an error.
 
   conditional(query, given)
-    Returns P(query | given) for ALL strata of the conditioning variables.
+    Returns P(query | given) for all conditioning strata, one line per stratum.
     Input:  query — list of node IDs for the query variables.
             given — list of node IDs for the conditioning variables.
-    Output: one line per (query-value, given-stratum) combination:
-            P(node4=0 | node0=0, node2=0) = 0.7234
-            P(node4=1 | node0=0, node2=0) = 0.2766  ...
+    Output: one line per conditioning stratum, listing all query-value probabilities
+            EXCEPT the largest domain value (which is omitted to save space):
+            P(node4 | node0=0, node2=0): 0→0.7234
+            P(node4 | node0=0, node2=1): 0→0.3105  ...
+    Omitted value: P(node4=largest | stratum) = 1 − sum of listed probabilities.
+            e.g. for binary node4 with domain {0,1}: P(node4=1|...) = 1 − P(node4=0|...)
+            e.g. for ternary node4 with domain {0,1,2}: P(node4=2|...) = 1 − P(0|...) − P(1|...)
     Note:   latent nodes in either list return an error.
 
 TASK
@@ -119,13 +123,15 @@ To compute P(node2, node3) for all value combinations:
 
 To compute P(node4 | node0, node2) for all strata:
   conditional(["4"], ["0", "2"])
-  returns -> P(node4=0 | node0=0, node2=0) = 0.7234
-    P(node4=1 | node0=0, node2=0) = 0.2766  ...
+  returns -> P(node4 | node0=0,node2=0): 0→0.7234
+    P(node4 | node0=0,node2=1): 0→0.3105  ...
+  (node4=1 value omitted per stratum; infer as 1 − listed value)
 
 To compute P(node4 | node0) marginalizing over everything else:
   conditional(["4"], ["0"])
-  returns -> P(node4=0 | node0=0) = 0.5512
-    P(node4=1 | node0=0) = 0.4488  ...
+  returns -> P(node4 | node0=0): 0→0.5512
+    P(node4 | node0=1): 0→0.4488  ...
+  (node4=1 value omitted; infer as 1 − listed value)
 
 Make all needed calls in parallel (up to a maximum of 4).
 """

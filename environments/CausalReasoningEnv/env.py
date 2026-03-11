@@ -91,7 +91,7 @@ async def marginal(
         int_assignments = dict(zip(int_vars, vals))
         prob = _joint_marginal(int_assignments, _cpts, _domains, _topo_order, _parents_map)
         lhs = ", ".join(f"node{v}={val}" for v, val in zip(int_vars, vals))
-        lines.append(f"P({lhs}) = {round(prob, 6)}")
+        lines.append(f"P({lhs}) = {round(prob, 4)}")
     return "\n".join(lines)
 
 
@@ -104,35 +104,46 @@ async def conditional(
     _parents_map: dict,
     _latent_nodes: list,
 ) -> str:
-    """Return the full conditional PMF P(query | given) for all strata of given variables.
+    """Return P(query | given) for all conditioning strata, one line per stratum.
+
+    Each line lists all query-value probabilities except the largest domain value.
+    The omitted probability = 1 minus the sum of the listed values.
+    Format: P(nodeQ | given_stratum): 0→prob0, 1→prob1, ...
 
     Args:
         query: List of node IDs (strings) for the query variables.
         given: List of node IDs (strings) for the conditioning variables.
-               Returns P(query=q | given=g) for every combination of q and g values.
     """
     int_query = [int(v) for v in query]
     int_given = [int(v) for v in given]
     for v in int_query + int_given:
         if v in _latent_nodes:
             return f"Error: node {v} is latent and not observable."
+    query_name = ",".join(f"node{v}" for v in int_query)
     lines = []
+    all_query_vals = list(itertools_product(*[range(len(_domains[v])) for v in int_query]))
     for given_vals in itertools_product(*[range(len(_domains[v])) for v in int_given]):
         given_assignments = dict(zip(int_given, given_vals))
         denom = _joint_marginal(given_assignments, _cpts, _domains, _topo_order, _parents_map)
+        given_str = ",".join(f"node{v}={val}" for v, val in zip(int_given, given_vals))
         if denom < 1e-10:
-            given_str = ", ".join(f"node{v}={val}" for v, val in zip(int_given, given_vals))
-            lines.append(f"P(... | {given_str}) = undefined (zero probability)")
+            lines.append(f"P({query_name} | {given_str}): undefined (zero probability)")
             continue
-        for query_vals in itertools_product(*[range(len(_domains[v])) for v in int_query]):
+        # Collect all query-value probs, then drop the last (largest domain index)
+        query_probs = []
+        for query_vals in all_query_vals:
             query_assignments = dict(zip(int_query, query_vals))
             numer = _joint_marginal(
                 {**query_assignments, **given_assignments},
                 _cpts, _domains, _topo_order, _parents_map,
             )
-            query_str = ", ".join(f"node{v}={val}" for v, val in zip(int_query, query_vals))
-            given_str = ", ".join(f"node{v}={val}" for v, val in zip(int_given, given_vals))
-            lines.append(f"P({query_str} | {given_str}) = {round(numer / denom, 6)}")
+            query_probs.append((query_vals, round(numer / denom, 4)))
+        shown = query_probs[:-1]  # omit largest-indexed value
+        if len(int_query) == 1:
+            vals_str = ", ".join(f"{qv[0]}→{prob}" for qv, prob in shown)
+        else:
+            vals_str = ", ".join(f"({','.join(str(x) for x in qv)})→{prob}" for qv, prob in shown)
+        lines.append(f"P({query_name} | {given_str}): {vals_str}")
     return "\n".join(lines)
 
 
