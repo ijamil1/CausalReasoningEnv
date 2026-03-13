@@ -775,6 +775,26 @@ def _try_sample_iv(
         for nd in topo_order
     }
 
+    # Enforce monotonicity of X's CPT w.r.t. Z_iv so that no defiers exist,
+    # making the Wald estimator equal to the true LATE (Angrist & Imbens 1994).
+    # For each stratum of X's non-Z parents, sample p0 <= p1 such that
+    # P(X=1 | Z=z_hi, others) >= P(X=1 | Z=z_lo, others) for all others.
+    x_parents = parents_map[X]
+    z_idx = x_parents.index(Z_iv)
+    non_z_parents = [p for i, p in enumerate(x_parents) if i != z_idx]
+    non_z_domains = [domains[p] for p in non_z_parents]
+    non_z_combos = list(itertools_product(*non_z_domains)) if non_z_domains else [()]
+    z_lo, z_hi = domains[Z_iv][0], domains[Z_iv][1]
+    monotone_x_cpt = {}
+    for non_z_vals in non_z_combos:
+        p0 = round(rng.uniform(0.1, 0.9), 3)
+        p1 = round(rng.uniform(p0, 0.9), 3)
+        key_lo = non_z_vals[:z_idx] + (z_lo,) + non_z_vals[z_idx:]
+        key_hi = non_z_vals[:z_idx] + (z_hi,) + non_z_vals[z_idx:]
+        monotone_x_cpt[key_lo] = p0
+        monotone_x_cpt[key_hi] = p1
+    cpts[X] = monotone_x_cpt
+
     return _build_problem_dict(
         G, X, Y, observed_nodes, latent_nodes,
         domains, cpts, topo_order, parents_map,
@@ -929,8 +949,6 @@ def generate_problems(
         return (
             tuple(tuple(e) for e in p["edges"]),
             tuple(p["nodes"]),
-            p["X"],
-            p["Y"],
             tuple(p["observed_nodes"]),
         )
 

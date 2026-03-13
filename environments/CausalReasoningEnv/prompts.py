@@ -46,7 +46,7 @@ You have exactly 2 turns to estimate the causal effect of X on Y.
 Your goal is to identify and compute the causal effect using the structure of the DAG:
   • PRIORITIZE computing the ATE USING the BACKDOOR criterion OR the FRONTDOOR criterion.
   • If neither is applicable given the causal structure, use an instrumental variable (IV) approach
-    to compute the LATE (Local Average Treatment Effect).
+    to compute the LATE (Local Average Treatment Effect). Assume NO defiers exist (ie: the presence of the instrument variable makes one more likely to be treated).
 
 In Turn 1, call declare(method=..., nodes=[...]) to commit to your chosen approach and the
 relevant node set, then make all probability tool calls needed to compute the effect.
