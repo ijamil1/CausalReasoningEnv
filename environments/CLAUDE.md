@@ -14,49 +14,51 @@ This repo builds a **causal reasoning benchmark** and paired RL training environ
 
 The environment implements a two-phase rollout over CPT-based DAGs:
 
-**Phase 1 (declaration):** Model reasons about the DAG and calls `declare_set(nodes)` to declare its identification set — scored independently of computation. For not-identifiable cases, model calls `declare_set([])` with no probability tools; env provides Turn 2 for `<answer>not_identifiable</answer>`.
+**Phase 1 (declaration + tools, Turn 1):** Model reasons about the DAG, calls `declare(method, nodes)` to commit to an identification approach and relevant node set, and makes all needed probability tool calls in the same response. Rollout terminates early if: no `declare` call, unparseable args, unknown method, no probability calls, or >4 total tool calls. Additionally terminates if the declared method or set is invalid.
 
-**Phase 2 (tool use + answer):** Model calls `marginal()` / `conditional()` tools and writes `<answer>` to end the episode. Capped at 4 tool calls total (declare_set + 3 probability tools for frontdoor). If the declared set is invalid, `env_response` terminates the rollout immediately without offering Phase 2.
+**Phase 2 (answer, Turn 2):** Model receives tool results and writes `<answer>ATE=X.XXXX</answer>` (backdoor/frontdoor) or `<answer>LATE=X.XXXX</answer>` (IV). Capped at 4 tool calls total (declare + up to 3 probability tools, which covers the frontdoor worst case).
 
 ### Problem Types
 
 | Type | Fraction | Description |
 |------|----------|-------------|
-| `backdoor_standard` | ~35% | Non-empty minimal adjustment set; verified no frontdoor ambiguity |
-| `backdoor_empty` | ~20% | Empty adjustment set (X,Y d-separated in backdoor graph) |
-| `frontdoor` | ~20% | Latent confounder; multi-node mediator set via `minimum_node_cut`; verified no backdoor |
-| `not_identifiable` | ~25% | Direct X→Y + latent confounder; neither method works |
+| `backdoor_standard` | ~35% | Non-empty minimal adjustment set; verified no frontdoor |
+| `backdoor_empty` | ~15% | Empty adjustment set (no backdoor confounding); verified no frontdoor |
+| `frontdoor` | ~40% | Latent confounder; valid mediator set M; verified no backdoor |
+| `iv` | ~10% | No backdoor/frontdoor; fresh exogenous IV node Z→X + latent confounder L→X,Y |
 
-Each problem has **exactly one valid identification method** by construction.
+Backdoor/frontdoor are mutually exclusive with each other. IV problems additionally verify no backdoor or frontdoor applies. Backdoor/frontdoor problems may coincidentally admit an IV instrument — this is intentional, as the system prompt directs models to prefer ATE methods.
 
 ### Key Functions in CausalReasoningEnv/
 
 Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](CausalReasoningEnv/data_generation/gen.py):
-- `_make_dag`, `_try_sample_backdoor`, `_try_sample_frontdoor` — DAG generation (in `gen.py`)
-- `_check_frontdoor_conditions` — frontdoor condition checker; defined in both `gen.py` and `env.py`
+- `_make_dag`, `_try_sample_backdoor`, `_try_sample_frontdoor`, `_try_sample_iv` — DAG generation (in `gen.py`)
+- `is_valid_backdoor_set`, `is_valid_frontdoor_set`, `is_valid_iv` — verifier functions exported from `gen.py`, imported by `env.py`
 - `format_problem` — DAG text rendering (in `gen.py`)
-- `_parse_set`, `_reconstruct_graph`, `_is_valid_set` — reward function helpers (in `env.py`)
+- `_joint_marginal`, `_reconstruct_graph`, `_parse_answer` — inference and parsing helpers (in `env.py`)
 
 ### Reward Rubric
 
-5-component rubric (weights: 0.05 / 0.30 / 0.15 / 0.25 / 0.25):
-- **`format_compliance`** — valid `<answer>` block present
-- **`set_valid`** — declared `<set>` satisfies the identification criterion for this problem type
-- **`minimality`** — graded: 1.0 if minimal size, k/|declared| if valid superset
-- **`process_correctness`** — binary 1.0 if all expected tool calls (by type + args) are present; gated on `set_valid`
-- **`ate_accuracy`** — final answer within absolute ±0.1 of true ATE (or correct not_identifiable); gated on `process_correctness`
+6-component rubric (weights: 0.05 / 0.125 / 0.125 / 0.10 / 0.50 / 0.10):
+- **`format_compliance`** — 0.0 if any Turn-1 format violation, answer tag in Turn 1, or missing answer after valid declaration
+- **`method_validity`** — 1.0 if declared method matches the problem's identification method
+- **`set_validity`** — 1.0 if declared node set correctly identifies the causal effect for the declared method; gated on `method_validity=1.0`
+- **`minimality`** — graded: 1.0 if declared set equals `minimal_set`; k/|declared| if valid superset; gated on both validity scores
+- **`ate_accuracy_binary`** — 1.0 if |answer − true target| < 0.1; works for both ATE and LATE
+- **`ate_accuracy_l2`** — exp(−10 × error²); continuous accuracy score
 
 ### Tools for CausalReasoningEnv
 
 Three tools are exposed to the model via `StatefulToolEnv`. Per-rollout CPT state is injected via `update_tool_args` (hidden from the model schema) for probability tools only:
-- `declare_set(nodes)` — declares the identification set; called in every Turn 1 response alongside probability tools (or alone for not-identifiable cases)
+- `declare(method, nodes)` — declares identification method ("backdoor"/"frontdoor"/"iv") and relevant node set; REQUIRED in every Turn 1 response
 - `marginal(variables)` — returns the full joint PMF P(V1, V2, ...) for given observed variables
 - `conditional(query, given)` — returns the full conditional PMF P(query | given) for all strata
 
 ### Data Generation Notes
 
-- **DAG structure:** Random DAGs stratified across 4 problem types (see Problem Types table above)
-- All CPTs, domains, topo order, parents map, and latent nodes serialized into `info` at generation time; true ATE computed via exact enumeration
+- **DAG structure:** Random DAGs (6–15 nodes) stratified across 4 problem types; mutual exclusivity enforced by construction
+- **Variable domains:** X ∈ {0,1}; Y ∈ {0,1,2,3,4}; other observed nodes have shifted integer domains (e.g. {-1,0} or {2,3,4}); latent nodes ∈ {0,1}
+- All CPTs, domains, topo order, parents map, and latent nodes serialized into `info` at generation time; true ATE/LATE computed via exact enumeration
 - Dataset hosted on HuggingFace: `irfanjamil/causal-reasoning-ate` (train / eval splits)
 - Data generation code in [data_generation/gen.py](CausalReasoningEnv/data_generation/gen.py)
 

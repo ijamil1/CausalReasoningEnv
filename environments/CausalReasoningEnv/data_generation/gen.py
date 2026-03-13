@@ -1,19 +1,26 @@
-"""Causal ATE benchmark data generation.
+"""Causal ATE/LATE benchmark data generation.
 
 Generates discrete CPT-based problems for the CausalReasoningEnv.
 All problems provide a DAG (observed/latent nodes), node domains, and CPTs
 (stored for exact probability query tools at inference time).
 
-Problem types:
+Problem types (mutually exclusive — exactly one method applies per problem):
   backdoor_standard  (~35%): non-empty minimal observed adjustment set.
-  backdoor_empty     (~20%): empty adjustment set (X,Y d-separated in backdoor graph).
-  frontdoor          (~20%): latent confounder; valid frontdoor mediator set M.
-  not_identifiable   (~25%): latent confounder; no valid backdoor or frontdoor.
+  backdoor_empty     (~15%): empty adjustment set (X,Y d-separated in backdoor graph).
+  frontdoor          (~40%): latent confounder; valid frontdoor mediator set M.
+  iv                 (~10%): latent confounder; no backdoor/frontdoor; IV instrument Z.
 
-Graph size: 6–12 total nodes. Node values: binary (X, Y always) or ternary.
+Variable domains:
+  X: always {0, 1}
+  Y: always {0, 1, 2, 3, 4}  (ATE ∈ [-4, 4])
+  Non-{X,Y} observed: binary {k, k+1} or ternary {k, k+1, k+2} with random shift k
+  Latent nodes: always {0, 1}
+
+Y is NOT required to be a leaf node.
 
 Data fields per problem:
-  problem_type            str
+  problem_type            str  ("backdoor_standard"|"backdoor_empty"|"frontdoor"|"iv")
+  identification_methods  list[str]  (single-element, maps problem_type to method)
   edges                   list of [u, v]
   nodes                   list of int
   X, Y                    int — treatment and outcome nodes
@@ -23,10 +30,10 @@ Data fields per problem:
   cpts                    dict str(node_id) → CPT with "|"-joined str keys
   topo_order              list of int
   parents_map             dict str(node_id) → list of int parent ids
-  identifiability_status  "identifiable" | "not_identifiable"
-  true_ATE                float | None  (exact, via do-calculus enumeration)
-  minimal_set             list[int] | None  (minimal adjustment or mediator set)
-  optimal_turns           int  (0/1/2/2 for not_identifiable/backdoor_empty/standard/frontdoor)
+  true_ATE                float | None  (None for iv problems)
+  true_LATE               float | None  (None for non-iv problems; Wald estimator)
+  minimal_set             list[int] | None
+  iv_instrument           int | None  (non-None for iv problems)
 """
 
 import json
@@ -112,39 +119,169 @@ def _check_frontdoor_conditions(G: nx.DiGraph, X: int, Y: int, M: set) -> bool |
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Verifier functions (exported — also used by env.py for reward computation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def is_valid_backdoor_set(
+    G: nx.DiGraph, X: int, Y: int, observed_nodes: set, Z: list | set
+) -> bool:
+    """Return True iff Z is a valid backdoor adjustment set for X→Y.
+
+    Z must:
+    - Be a subset of observed_nodes (excluding X and Y)
+    - Not contain any descendants of X
+    - d-separate X and Y in the backdoor graph (G with X's outgoing edges removed)
+    """
+    Z = set(Z)
+    if not Z.issubset(observed_nodes):
+        return False
+    if X in Z or Y in Z:
+        return False
+    if Z & nx.descendants(G, X):
+        return False
+    G_bd = _make_backdoor_graph(G, X)
+    try:
+        return is_d_separator(G_bd, {X}, {Y}, Z)
+    except Exception:
+        return False
+
+
+def is_valid_frontdoor_set(
+    G: nx.DiGraph, X: int, Y: int, observed_nodes: set, M: list | set
+) -> bool:
+    """Return True iff M is a valid frontdoor mediator set for X→Y."""
+    M = set(M)
+    if not M:
+        return False
+    if not M.issubset(observed_nodes):
+        return False
+    return _check_frontdoor_conditions(G, X, Y, M) is True
+
+
+def is_valid_iv(
+    G: nx.DiGraph, X: int, Y: int, observed_nodes: set, Z_iv: int
+) -> bool:
+    """Return True iff Z_iv is a valid instrumental variable for X→Y.
+
+    Conditions:
+    1. Z_iv is observed, not X, not Y
+    2. Z_iv can reach X (directed path Z_iv→...→X)
+    3. Exclusion restriction: Z_iv cannot reach Y in G without X
+       (i.e., Z_iv and Y are d-separated when X is removed)
+    4. Exogeneity: Z_iv has no latent ancestors
+    """
+    if Z_iv not in observed_nodes:
+        return False
+    if Z_iv == X or Z_iv == Y:
+        return False
+    if not nx.has_path(G, Z_iv, X):
+        return False
+    # Exclusion restriction: remove X and check if Z_iv can still reach Y
+    G_no_X = G.copy()
+    G_no_X.remove_node(X)
+    try:
+        if nx.has_path(G_no_X, Z_iv, Y):
+            return False
+    except nx.NodeNotFound:
+        pass
+    # Exogeneity: no latent ancestors of Z_iv
+    latent_nodes = set(G.nodes()) - set(observed_nodes)
+    if nx.ancestors(G, Z_iv) & latent_nodes:
+        return False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain assignment
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _sample_domain(cardinality: int, rng: random.Random) -> list[int]:
+    """Return a domain list of the given cardinality with a random integer shift.
+
+    Binary:  {k, k+1}   where k ∈ [-4, 4]
+    Ternary: {k, k+1, k+2} where k ∈ [-4, 3]
+    """
+    if cardinality == 2:
+        k = rng.randint(-4, 4)
+        return [k, k + 1]
+    elif cardinality == 3:
+        k = rng.randint(-4, 3)
+        return [k, k + 1, k + 2]
+    else:
+        raise ValueError(f"Unsupported cardinality: {cardinality}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CPT generation and serialization
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _gen_cpt(rng: random.Random, n_cat: int, parent_cats: list[int]) -> dict:
-    """Generate a CPT.
+def _gen_cpt(
+    rng: random.Random,
+    domain: list[int],
+    parent_domains: list[list[int]],
+) -> dict:
+    """Generate a CPT using actual domain values (not 0-indexed).
 
-    Returns dict mapping tuple(parent_values) →
-        float P(V=1|pa)       for binary nodes (n_cat=2)
-        list [P(V=0), P(V=1), P(V=2)]  for ternary nodes (n_cat=3)
+    Returns dict mapping tuple(actual_parent_values) →
+        float P(V=domain[1]|pa)                    for binary nodes (|domain|=2)
+        list [P(V=domain[0]|pa), ..., P(V=domain[-1]|pa)]  for multi-valued nodes
+
+    Y (|domain|=5) uses min_prob=0.05 to allow wider ATE range.
+    Other multi-valued nodes use min_prob=0.10.
     """
-    combos = list(itertools_product(*[range(k) for k in parent_cats])) if parent_cats else [()]
+    combos = list(itertools_product(*parent_domains)) if parent_domains else [()]
+    n_cat = len(domain)
     cpt = {}
+
     for combo in combos:
         if n_cat == 2:
             cpt[combo] = round(rng.uniform(0.1, 0.9), 3)
-        else:
-            for _ in range(100):
-                raw = [rng.uniform(0.15, 0.7) for _ in range(3)]
+
+        elif n_cat == 5:
+            # Y's 5-valued domain; lower min_prob for wider ATE spread
+            min_p = 0.05
+            probs_r = None
+            for _ in range(200):
+                raw = [rng.uniform(0.05, 1.0) for _ in range(5)]
                 s = sum(raw)
-                probs = [round(r / s, 3) for r in raw]
-                probs[2] = round(1.0 - probs[0] - probs[1], 3)
-                if all(p >= 0.1 for p in probs):
+                probs = [r / s for r in raw]
+                if all(p >= min_p for p in probs):
+                    pr = [round(p, 4) for p in probs]
+                    pr[-1] = round(1.0 - sum(pr[:-1]), 4)
+                    if all(p >= min_p for p in pr):
+                        probs_r = pr
+                        break
+            cpt[combo] = probs_r if probs_r is not None else [0.2, 0.2, 0.2, 0.2, 0.2]
+
+        else:
+            # Ternary or other multi-valued: min_prob = 0.10
+            min_p = 0.1
+            probs_r = None
+            for _ in range(100):
+                raw = [rng.uniform(0.15, 0.7) for _ in range(n_cat)]
+                s = sum(raw)
+                probs = [r / s for r in raw]
+                pr = [round(p, 3) for p in probs]
+                pr[-1] = round(1.0 - sum(pr[:-1]), 3)
+                if all(p >= min_p for p in pr):
+                    probs_r = pr
                     break
-            cpt[combo] = probs
+            if probs_r is None:
+                probs_r = [round(1.0 / n_cat, 3)] * n_cat
+            cpt[combo] = probs_r
+
     return cpt
 
 
 def _serialize_cpts(cpts: dict) -> dict:
-    """Convert CPT dict (tuple keys) to JSON-serializable (str keys).
+    """Convert CPT dict (tuple keys of actual values) to JSON-serializable (str keys).
 
     Empty tuple () → "" (root nodes with no parents).
-    Non-empty tuple (0, 1) → "0|1".
+    Non-empty tuple (e.g. (-1, 2)) → "-1|2".
+    Negative values are handled correctly since we split on "|" not "-".
     """
     result = {}
     for nd, cpt in cpts.items():
@@ -156,7 +293,7 @@ def _serialize_cpts(cpts: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Exact ATE computation via do-calculus enumeration
+# Exact ATE and LATE computation
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -164,65 +301,102 @@ def _compute_true_ate_exact(
     X: int,
     Y: int,
     cpts: dict,
-    n_cats: dict,
+    domains: dict,
     topo_order: list,
     parents_map: dict,
 ) -> float:
-    """Compute true ATE exactly via do-calculus enumeration (no simulation)."""
-    non_xy = [nd for nd in topo_order if nd != X and nd != Y]
+    """Compute true ATE exactly via do-calculus enumeration (no simulation).
+
+    Enumerates ALL non-X variables (including Y and Y's children if any),
+    so this is correct even when Y is not a leaf node.
+
+    ATE = E[Y | do(X=1)] - E[Y | do(X=0)]
+
+    domains: dict node_id → list of actual int values
+    cpts: dict node_id → {tuple(actual_parent_values): prob_or_list}
+    """
+    non_x = [nd for nd in topo_order if nd != X]
 
     def e_y_do_x(x_val: int) -> float:
         ey = 0.0
-        for vals in itertools_product(*[range(n_cats[nd]) for nd in non_xy]):
-            config = dict(zip(non_xy, vals))
+        for vals in itertools_product(*[domains[nd] for nd in non_x]):
+            config = dict(zip(non_x, vals))
             config[X] = x_val
-            config[Y] = 1
             prob = 1.0
-            for nd in non_xy:
-                pa = parents_map[nd]
-                pa_vals = tuple(config[p] for p in pa)
+            for nd in non_x:
+                pa_vals = tuple(config[p] for p in parents_map[nd])
                 cpt_entry = cpts[nd][pa_vals]
                 v = config[nd]
-                if n_cats[nd] == 2:
-                    prob *= cpt_entry if v == 1 else (1.0 - cpt_entry)
+                dom = domains[nd]
+                if len(dom) == 2:
+                    prob *= cpt_entry if v == dom[1] else (1.0 - cpt_entry)
                 else:
-                    prob *= cpt_entry[v]
-            # Y is always binary; CPT entry IS P(Y=1 | pa(Y))
-            pa_y_vals = tuple(config[p] for p in parents_map[Y])
-            prob *= cpts[Y][pa_y_vals]
-            ey += prob
+                    prob *= cpt_entry[dom.index(v)]
+            ey += config[Y] * prob
         return ey
 
     return round(e_y_do_x(1) - e_y_do_x(0), 6)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Optimal turns computation
-# ─────────────────────────────────────────────────────────────────────────────
+def _compute_true_late(
+    Z: int,
+    X: int,
+    Y: int,
+    cpts: dict,
+    domains: dict,
+    topo_order: list,
+    parents_map: dict,
+) -> float | None:
+    """Compute true LATE via Wald estimator on the exact observational distribution.
 
+    LATE = (E[Y|Z=z1] - E[Y|Z=z0]) / (E[X|Z=z1] - E[X|Z=z0])
 
-def _compute_optimal_turns(problem_type: str) -> int:
-    """Minimum tool calls needed for the correct identification formula.
+    Since Z is exogenous (no parents), E[Y|Z=z] = E[Y|do(Z=z)], computed by
+    fixing Z and enumerating all other variables. Latent variables are
+    marginalized over automatically.
 
-    not_identifiable:  0  (model declares from DAG structure alone)
-    backdoor_empty:    1  (one conditional call: P(Y|X))
-    backdoor_standard: 2  (conditional P(Y|X,Z) + marginal P(Z))
-    frontdoor:         2  (marginal P(X,M) + conditional P(Y|X,M))
+    Returns None if the IV is degenerate (denominator ≈ 0).
     """
-    if problem_type == "not_identifiable":
-        return 0
-    elif problem_type == "backdoor_empty":
-        return 1
-    elif problem_type == "backdoor_standard":
-        return 2
-    elif problem_type == "frontdoor":
-        return 2
-    return 0
+    non_z = [nd for nd in topo_order if nd != Z]
+    z_domain = domains[Z]  # binary IV: [z0, z1]
+
+    def expectations_given_z(z_val: int):
+        ey = ex = 0.0
+        for vals in itertools_product(*[domains[nd] for nd in non_z]):
+            config = dict(zip(non_z, vals))
+            config[Z] = z_val
+            prob = 1.0
+            for nd in non_z:
+                pa_vals = tuple(config[p] for p in parents_map[nd])
+                cpt_entry = cpts[nd][pa_vals]
+                v = config[nd]
+                dom = domains[nd]
+                if len(dom) == 2:
+                    prob *= cpt_entry if v == dom[1] else (1.0 - cpt_entry)
+                else:
+                    prob *= cpt_entry[dom.index(v)]
+            ey += config[Y] * prob  # Y ∈ {0,1,2,3,4}
+            ex += config[X] * prob  # X ∈ {0,1}; E[X|Z=z] = P(X=1|Z=z)
+        return ey, ex
+
+    ey1, ex1 = expectations_given_z(z_domain[1])
+    ey0, ex0 = expectations_given_z(z_domain[0])
+    denom = ex1 - ex0
+    if abs(denom) < 1e-10:
+        return None  # degenerate IV: Z has no effect on X
+    return round((ey1 - ey0) / denom, 6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Problem dict builder
 # ─────────────────────────────────────────────────────────────────────────────
+
+_PTYPE_TO_METHOD = {
+    "backdoor_standard": "backdoor",
+    "backdoor_empty": "backdoor",
+    "frontdoor": "frontdoor",
+    "iv": "iv",
+}
 
 
 def _build_problem_dict(
@@ -231,36 +405,79 @@ def _build_problem_dict(
     Y: int,
     observed_nodes: set,
     latent_nodes: set,
-    n_cats: dict,
+    domains: dict,
     cpts: dict,
     topo_order: list,
     parents_map: dict,
     problem_type: str,
     minimal_set: list | None,
+    iv_instrument: int | None = None,
 ) -> dict:
-    true_ate = None
-    if problem_type != "not_identifiable":
-        true_ate = _compute_true_ate_exact(X, Y, cpts, n_cats, topo_order, parents_map)
+    """Build the canonical problem dict.
 
-    optimal_turns = _compute_optimal_turns(problem_type)
+    For non-iv problems: computes true_ATE via exact enumeration.
+    For iv problems: computes true_LATE via Wald estimator.
+    """
+    true_ate = None
+    true_late = None
+
+    if problem_type == "iv":
+        assert iv_instrument is not None
+        true_late = _compute_true_late(iv_instrument, X, Y, cpts, domains, topo_order, parents_map)
+    else:
+        true_ate = _compute_true_ate_exact(X, Y, cpts, domains, topo_order, parents_map)
 
     return {
         "problem_type": problem_type,
+        "identification_methods": [_PTYPE_TO_METHOD[problem_type]],
         "edges": [[int(u), int(v)] for u, v in sorted(G.edges())],
         "nodes": [int(nd) for nd in sorted(G.nodes())],
         "X": int(X),
         "Y": int(Y),
         "observed_nodes": sorted(int(nd) for nd in observed_nodes),
         "latent_nodes": sorted(int(nd) for nd in latent_nodes),
-        "domains": {str(nd): list(range(n_cats[nd])) for nd in sorted(G.nodes())},
+        "domains": {str(nd): list(domains[nd]) for nd in sorted(G.nodes())},
         "cpts": _serialize_cpts(cpts),
         "topo_order": [int(nd) for nd in topo_order],
         "parents_map": {str(nd): [int(p) for p in parents_map[nd]] for nd in G.nodes()},
-        "identifiability_status": "not_identifiable" if problem_type == "not_identifiable" else "identifiable",
         "true_ATE": float(true_ate) if true_ate is not None else None,
+        "true_LATE": float(true_late) if true_late is not None else None,
         "minimal_set": [int(nd) for nd in minimal_set] if minimal_set is not None else None,
-        "optimal_turns": optimal_turns,
+        "iv_instrument": int(iv_instrument) if iv_instrument is not None else None,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain assignment helper (shared across all samplers)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _assign_domains(
+    nodes_list: list,
+    X: int,
+    Y: int,
+    latent_nodes: set,
+    rng: random.Random,
+) -> dict:
+    """Assign domains to all nodes.
+
+    X → [0, 1]
+    Y → [0, 1, 2, 3, 4]
+    Latent → [0, 1]
+    Other observed: binary {k,k+1} (60%) or ternary {k,k+1,k+2} (40%) with random k
+    """
+    domains = {}
+    for nd in nodes_list:
+        if nd == X:
+            domains[nd] = [0, 1]
+        elif nd == Y:
+            domains[nd] = [0, 1, 2, 3, 4]
+        elif nd in latent_nodes:
+            domains[nd] = [0, 1]
+        else:
+            cardinality = 2 if rng.random() < 0.6 else 3
+            domains[nd] = _sample_domain(cardinality, rng)
+    return domains
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,7 +495,9 @@ def _try_sample_backdoor(
 ) -> dict | None:
     """Sample a backdoor_standard or backdoor_empty problem.
 
-    Method ambiguity check: reject if a valid frontdoor set also exists.
+    Y may be a non-leaf (no out_degree constraint).
+    Rejects if a valid frontdoor set also exists (backdoor/frontdoor are mutually exclusive).
+    IV ambiguity is not checked — the system prompt directs models to prefer ATE methods.
     """
     n = rng.randint(min_nodes, max_nodes)
     G = _make_dag(n, edge_prob, rng)
@@ -289,13 +508,20 @@ def _try_sample_backdoor(
     X, Y = rng.sample(nodes_list, 2)
     if not nx.has_path(G, X, Y):
         return None
-    if G.out_degree(Y) > 0:
-        return None
+    # Removed: if G.out_degree(Y) > 0: return None  (Y non-leaf is now allowed)
     if nx.has_path(G, Y, X):
         return None
 
     other_nodes = [nd for nd in nodes_list if nd != X and nd != Y]
     latent_nodes = {nd for nd in other_nodes if rng.random() < latent_prob}
+
+    # For non-empty backdoor problems, ensure at least one parent of X is latent
+    # so the model cannot trivially return pa(X) as the adjustment set.
+    if not empty:
+        parents_of_x = [nd for nd in G.predecessors(X) if nd != Y]
+        if parents_of_x and not (set(parents_of_x) & latent_nodes):
+            latent_nodes.add(rng.choice(parents_of_x))
+
     observed_nodes = set(nodes_list) - latent_nodes
 
     G_bd = _make_backdoor_graph(G, X)
@@ -327,32 +553,29 @@ def _try_sample_backdoor(
     if not empty and min_set.issubset(set(G.predecessors(X))):  # reject trivial pa(X) adjustment
         return None
 
-    # Eliminate method ambiguity: verify no valid frontdoor set exists
+    # Eliminate frontdoor ambiguity: verify no valid frontdoor set exists
     if not G.has_edge(X, Y):
-        M_temp = frozenset(v for v in G.successors(X) if nx.has_path(G, v, Y))
-        if M_temp and _check_frontdoor_conditions(G, X, Y, M_temp):
-            return None  # frontdoor also valid via M_temp, resample
+        M_temp = frozenset(
+            v for v in G.successors(X)
+            if v in observed_nodes and nx.has_path(G, v, Y)
+        )
+        if M_temp and _check_frontdoor_conditions(G, X, Y, M_temp) is True:
+            return None  # frontdoor also valid, resample
 
     adjustment_set = sorted(min_set)
 
-    n_cats = {}
-    for nd in nodes_list:
-        if nd == X or nd == Y or nd in latent_nodes:
-            n_cats[nd] = 2
-        else:
-            n_cats[nd] = 2 if rng.random() < 0.6 else 3
-
+    domains = _assign_domains(nodes_list, X, Y, latent_nodes, rng)
     topo_order = list(nx.topological_sort(G))
     parents_map = {nd: sorted(G.predecessors(nd)) for nd in G.nodes()}
     cpts = {
-        nd: _gen_cpt(rng, n_cats[nd], [n_cats[p] for p in parents_map[nd]])
+        nd: _gen_cpt(rng, domains[nd], [domains[p] for p in parents_map[nd]])
         for nd in topo_order
     }
 
     ptype = "backdoor_empty" if empty else "backdoor_standard"
     return _build_problem_dict(
         G, X, Y, observed_nodes, latent_nodes,
-        n_cats, cpts, topo_order, parents_map,
+        domains, cpts, topo_order, parents_map,
         ptype, adjustment_set,
     )
 
@@ -361,20 +584,17 @@ def _try_sample_frontdoor(
     rng: random.Random,
     min_nodes: int,
     max_nodes: int,
-    edge_prob: float
+    edge_prob: float,
 ) -> dict | None:
     """Sample a frontdoor problem.
 
-    X and Y are sampled freely (path X→Y exists, no direct X→Y edge, Y is a sink).
-    M_star = minimum node cut of G_desc gives the globally minimal set satisfying
-    condition 1. External (non-X, non-descendant-of-X) incoming edges are removed
-    from M_star nodes and from every descendant-of-X ancestor of M_star (the full
-    X→M_star pathway). This eliminates every entry point that could violate
-    conditions 2 or 3 without touching any directed X→Y path or changing G_desc
-    (so M_star minimality is preserved). Frontdoor conditions are then verified as
-    a sanity check and the absence of a valid backdoor adjustment set is confirmed.
+    Y may be a non-leaf (no out_degree constraint).
+    X→Y direct edge is still forbidden (frontdoor condition 1 would fail).
+    Uses minimum node cut to find M_star; removes external incoming edges to
+    ensure all three frontdoor conditions hold. Verifies no backdoor set exists
+    (backdoor/frontdoor are mutually exclusive).
+    IV ambiguity is not checked — the system prompt directs models to prefer ATE methods.
     """
-
     n = rng.randint(min_nodes, max_nodes)
     i = 0
     proceed_flag = False
@@ -385,9 +605,7 @@ def _try_sample_frontdoor(
         if not nx.has_path(G, X, Y):
             i += 1
             continue
-        if G.out_degree(Y) > 0:
-            i += 1
-            continue
+        # Removed: if G.out_degree(Y) > 0: continue  (Y non-leaf allowed)
         if G.has_edge(X, Y):
             i += 1
             continue
@@ -407,7 +625,6 @@ def _try_sample_frontdoor(
     nodes_list = sorted(G.nodes())
 
     # Build descendant subgraph of X and find the minimum vertex cut (M_star).
-    # M_star is the globally minimal set satisfying frontdoor condition 1.
     desc_of_X = nx.descendants(G, X)
     G_desc = G.subgraph(desc_of_X | {X, Y}).copy()
     try:
@@ -423,24 +640,8 @@ def _try_sample_frontdoor(
     if M_star & latent_nodes:
         return None
 
-    # Remove all external (non-X, non-descendant-of-X) incoming edges to both
-    # M_star nodes and every descendant-of-X ancestor of M_star (the full
-    # X → ... → M_star pathway).
-    #
-    # Why pathway nodes need the same treatment:
-    #   A descendant d ∈ desc(X) that is an ancestor of some m ∈ M_star and
-    #   has a non-descendant parent A (A → d) creates an active undirected path
-    #   X ← pa(X) → A → d → ... → m in the backdoor graph G_xbar, violating
-    #   condition 2.  The violation can occur at any depth (X → d1 → d2 → m
-    #   with A → d1), so the fix must cover all ancestors of M_star within
-    #   desc(X), not just M_star's direct parents.
-    #
-    # Why this is safe:
-    #   - Removed edges come from outside desc(X), so G_desc is unchanged and
-    #     M_star remains the minimum node cut (minimality / condition 1 preserved).
-    #   - All directed X→Y paths travel through desc(X); removing external
-    #     (non-descendant) edges into these nodes cannot cut any X→Y path.
-    #   - _check_frontdoor_conditions below verifies all three conditions hold.
+    # Remove external (non-X, non-descendant-of-X) incoming edges to M_star nodes
+    # and to all X-descendant ancestors of M_star (the full X→M_star pathway).
     anc_of_M_star = set()
     for m in M_star:
         anc_of_M_star |= nx.ancestors(G, m)
@@ -451,14 +652,12 @@ def _try_sample_frontdoor(
             if parent != X and parent not in desc_of_X and parent not in M_star:
                 G.remove_edge(parent, node)
 
-    # Sanity check: frontdoor conditions must hold after the above deletions.
+    # Verify all frontdoor conditions hold after edge removals
     _fd_result = _check_frontdoor_conditions(G, X, Y, M_star)
     if _fd_result is not True:
         return None
 
-    # Sanity check: M_star must still be a minimum node cut in the updated graph.
-    # Edge removals should never touch G_desc (all removed edges come from outside
-    # desc(X)), but we verify explicitly to catch any unexpected regression.
+    # Verify M_star is still a minimum node cut
     G_desc_post = G.subgraph(desc_of_X | {X, Y}).copy()
     try:
         post_cut = nx.minimum_node_cut(G_desc_post, X, Y)
@@ -467,7 +666,7 @@ def _try_sample_frontdoor(
     if len(post_cut) != len(M_star):
         return None
 
-    # Verify no valid backdoor adjustment set exists among observed nodes.
+    # Mutual exclusivity: no valid backdoor adjustment set
     G_bd = _make_backdoor_graph(G, X)
     try:
         Z = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
@@ -478,41 +677,35 @@ def _try_sample_frontdoor(
 
     minimal_set = sorted(M_star)
 
-    n_cats = {}
-    for nd in nodes_list:
-        if nd == X or nd == Y or nd == L:
-            n_cats[nd] = 2
-        else:
-            n_cats[nd] = 2 if rng.random() < 0.6 else 3
-
+    domains = _assign_domains(nodes_list, X, Y, latent_nodes, rng)
     topo_order = list(nx.topological_sort(G))
     parents_map = {nd: sorted(G.predecessors(nd)) for nd in G.nodes()}
     cpts = {
-        nd: _gen_cpt(rng, n_cats[nd], [n_cats[p] for p in parents_map[nd]])
+        nd: _gen_cpt(rng, domains[nd], [domains[p] for p in parents_map[nd]])
         for nd in topo_order
     }
 
     return _build_problem_dict(
         G, X, Y, observed_nodes, latent_nodes,
-        n_cats, cpts, topo_order, parents_map,
+        domains, cpts, topo_order, parents_map,
         "frontdoor", minimal_set,
     )
 
 
-def _try_sample_not_identifiable(
+def _try_sample_iv(
     rng: random.Random,
     min_nodes: int,
     max_nodes: int,
     edge_prob: float,
 ) -> dict | None:
-    """Sample a not_identifiable problem.
+    """Sample an IV problem.
 
-    Requires a latent confounder L→X, L→Y (blocks backdoor). Verifies
-    find_minimal_d_separator returns None (no valid backdoor set) and that no
-    valid frontdoor mediator set exists (checked via the same candidate set
-    used in the backdoor ambiguity guard: direct successors of X that reach Y).
-    A direct X→Y edge implicitly satisfies the frontdoor check (condition 1
-    fails immediately), so no special-casing is needed.
+    Adds a fresh exogenous IV node Z (Z→X only) and a latent confounder L (L→X, L→Y).
+    Ensures:
+    - Z is the unique valid IV among X's observed direct parents
+    - No valid backdoor adjustment set exists
+    - No valid frontdoor mediator set exists
+    Y may be a non-leaf.
     """
     n = rng.randint(min_nodes, max_nodes)
     G = _make_dag(n, edge_prob, rng)
@@ -523,44 +716,69 @@ def _try_sample_not_identifiable(
     X, Y = rng.sample(nodes_list, 2)
     if not nx.has_path(G, X, Y):
         return None
-    if G.out_degree(Y) > 0:
-        return None
     if nx.has_path(G, Y, X):
         return None
 
-    L = _add_latent_confounder(G, X, Y, n)
-    nodes_list = sorted(G.nodes())
-    observed_nodes = set(range(n))
+    # Add fresh exogenous IV node Z (no parents, only edge Z→X)
+    Z_iv = n
+    G.add_node(Z_iv)
+    G.add_edge(Z_iv, X)
+
+    # Add latent confounder L→X, L→Y
+    L = n + 1
+    G.add_node(L)
+    G.add_edge(L, X)
+    G.add_edge(L, Y)
+
+    all_nodes = sorted(G.nodes())
+    observed_nodes = set(range(n)) | {Z_iv}  # original nodes + IV; L is latent
     latent_nodes = {L}
 
-    # Verify no valid backdoor adjustment set exists
+    # Verify Z_iv satisfies IV conditions
+    if not is_valid_iv(G, X, Y, observed_nodes, Z_iv):
+        return None
+
+    # Uniqueness: among X's observed direct parents, only Z_iv may be a valid IV
+    for parent in list(G.predecessors(X)):
+        if parent == Z_iv or parent not in observed_nodes:
+            continue
+        if is_valid_iv(G, X, Y, observed_nodes, parent):
+            return None  # another observed parent is also a valid IV, reject
+
+    # Mutual exclusivity: no valid backdoor adjustment set
     G_bd = _make_backdoor_graph(G, X)
     try:
-        check = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
+        Z_bd = find_minimal_d_separator(G_bd, X, Y, restricted=observed_nodes - {X, Y})
     except Exception:
         return None
-    if check is not None:
+    if Z_bd is not None:
         return None
 
-    # Verify no valid frontdoor mediator set exists
-    # (if direct X→Y edge exists, frontdoor condition 1 already fails)
+    # Mutual exclusivity: no valid frontdoor mediator set
     if not G.has_edge(X, Y):
-        M_temp = frozenset(v for v in G.successors(X) if nx.has_path(G, v, Y))
-        if M_temp and _check_frontdoor_conditions(G, X, Y, M_temp):
+        desc_of_X = nx.descendants(G, X)
+        M_temp = frozenset(
+            v for v in G.successors(X)
+            if v in observed_nodes and v in desc_of_X and nx.has_path(G, v, Y)
+        )
+        if M_temp and _check_frontdoor_conditions(G, X, Y, M_temp) is True:
             return None
 
-    n_cats = {nd: 2 for nd in nodes_list}
+    domains = _assign_domains(all_nodes, X, Y, latent_nodes, rng)
+    # IV instrument Z gets domain {0,1}
+    domains[Z_iv] = [0, 1]
+
     topo_order = list(nx.topological_sort(G))
     parents_map = {nd: sorted(G.predecessors(nd)) for nd in G.nodes()}
     cpts = {
-        nd: _gen_cpt(rng, n_cats[nd], [n_cats[p] for p in parents_map[nd]])
+        nd: _gen_cpt(rng, domains[nd], [domains[p] for p in parents_map[nd]])
         for nd in topo_order
     }
 
     return _build_problem_dict(
         G, X, Y, observed_nodes, latent_nodes,
-        n_cats, cpts, topo_order, parents_map,
-        "not_identifiable", None,
+        domains, cpts, topo_order, parents_map,
+        "iv", [Z_iv], iv_instrument=Z_iv,
     )
 
 
@@ -632,7 +850,7 @@ def format_problem(p: dict) -> str:
     )
 
     reminder = (
-        f"\n\nYour task: identify a minimal identification set and compute the ATE of X (Node {X}) on Y (Node {Y})\n"
+        f"\n\nYour task: compute the causal effect of X (Node {X}) on Y (Node {Y}).\n"
         f"Follow the instructions and response format specified in the system prompt."
     )
 
@@ -643,21 +861,24 @@ def build_dataset(problems: list[dict]) -> Dataset:
     """Convert a list of problem dicts into a HuggingFace Dataset."""
     rows = []
     for p in problems:
-        true_ate = p["true_ATE"]
-        if p["identifiability_status"] == "identifiable" and true_ate is not None:
-            answer = f"ATE={round(true_ate, 4)}"
+        ptype = p["problem_type"]
+        if ptype == "iv":
+            true_val = p["true_LATE"]
+            answer = f"LATE={round(true_val, 4)}" if true_val is not None else "unknown"
         else:
-            answer = "not_identifiable"
+            true_val = p["true_ATE"]
+            answer = f"ATE={round(true_val, 4)}" if true_val is not None else "unknown"
 
         rows.append({
             "question": format_problem(p),
             "answer": answer,
             "info": json.dumps({
                 "problem_type": p["problem_type"],
-                "identifiability_status": p["identifiability_status"],
+                "identification_methods": p["identification_methods"],
                 "true_ATE": p["true_ATE"],
-                "optimal_turns": p["optimal_turns"],
+                "true_LATE": p["true_LATE"],
                 "minimal_set": p["minimal_set"],
+                "iv_instrument": p["iv_instrument"],
                 "X": p["X"],
                 "Y": p["Y"],
                 "nodes": p["nodes"],
@@ -682,21 +903,30 @@ def generate_problems(
     n: int = 1000,
     seed: int = 42,
     min_nodes: int = 6,
-    max_nodes: int = 12,
+    max_nodes: int = 15,
 ) -> list[dict]:
-    """Generate a problem set. Returns a list of problem dicts."""
+    """Generate a problem set. Returns a list of problem dicts.
+
+    Stratification:
+      backdoor_standard: 35%
+      backdoor_empty:    15%
+      frontdoor:         40%
+      iv:                10%
+
+    ATE/LATE coverage: bin-based rejection to avoid clustering in [-0.5, 0.5].
+    Each 0.5-unit bin of [-4, 4] is capped at max_per_bin per problem type.
+    """
     rng = random.Random(seed)
 
     fracs = {
         "backdoor_standard": 0.35,
         "backdoor_empty": 0.15,
-        "frontdoor": 0.25,
-        "not_identifiable": 0.25,
+        "frontdoor": 0.40,
+        "iv": 0.10,
     }
 
     def _problem_key(p: dict) -> tuple:
         return (
-            p["problem_type"],
             tuple(tuple(e) for e in p["edges"]),
             tuple(p["nodes"]),
             p["X"],
@@ -704,34 +934,60 @@ def generate_problems(
             tuple(p["observed_nodes"]),
         )
 
+    def _ate_bin(val: float) -> int:
+        """Map ATE/LATE value in [-4, 4] to bin index 0..15 (width 0.5)."""
+        clamped = max(-4.0, min(3.9999, val))
+        return int((clamped + 4.0) / 0.5)
+
     def _sample_bucket(ptype: str, n_target: int) -> list[dict]:
         problems = []
         seen = set()
-        max_attempts = n_target * 500
+        ate_bins: dict[int, int] = {}
+        max_per_bin = max(1, int(n_target * 0.12))
+        max_attempts = n_target * 1000
+
         for _ in range(max_attempts):
             if len(problems) >= n_target:
                 break
+
             if ptype == "backdoor_standard":
                 p = _try_sample_backdoor(rng, min_nodes, max_nodes, 0.4, 0.2, empty=False)
             elif ptype == "backdoor_empty":
                 p = _try_sample_backdoor(rng, min_nodes, max_nodes, 0.4, 0.0, empty=True)
             elif ptype == "frontdoor":
                 p = _try_sample_frontdoor(rng, min_nodes, max_nodes, 0.4)
-            elif ptype == "not_identifiable":
-                p = _try_sample_not_identifiable(rng, min_nodes, max_nodes, 0.4)
             else:
-                p = None
-            if p is not None:
-                key = _problem_key(p)
-                if key not in seen:
-                    seen.add(key)
-                    problems.append(p)
+                p = _try_sample_iv(rng, min_nodes, max_nodes, 0.4)
+   
+            if p is None:
+                continue
+
+            key = _problem_key(p)
+            if key in seen:
+                continue
+
+            # ATE/LATE coverage bin check
+            val = p["true_LATE"] if ptype == "iv" else p["true_ATE"]
+            if val is None:
+                continue
+            b = _ate_bin(val)
+            #if ate_bins.get(b, 0) >= max_per_bin:
+            #    continue  # bin saturated; skip this problem
+
+            seen.add(key)
+            problems.append(p)
+            if len(problems) % 25 == 0:
+                print('generated {} problems for problems of type {}'.format(len(problems), ptype)) 
+            ate_bins[b] = ate_bins.get(b, 0) + 1
+
         return problems
 
     problems = []
     for ptype, frac in fracs.items():
         n_target = max(1, round(n * frac))
-        problems.extend(_sample_bucket(ptype, n_target))
-        print('finished generating {} problems'.format(ptype))
+        bucket = _sample_bucket(ptype, n_target)
+        problems.extend(bucket)
+        print(f"generated {len(bucket)}/{n_target} {ptype} problems")
+
     rng.shuffle(problems)
     return problems
