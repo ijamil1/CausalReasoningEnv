@@ -465,7 +465,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         Args:
             method: "backdoor", "frontdoor", or "iv"
             nodes: adjustment set (backdoor), mediator set (frontdoor),
-                   or single-element list [instrument_node] (iv). Pass node IDs as strings.
+                   or instrumental variable set (iv). Pass node IDs as strings.
         """
         return f"Declaration received: method={method}, nodes={nodes}"
 

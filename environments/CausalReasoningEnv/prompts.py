@@ -19,7 +19,7 @@ You have access to three tools:
     Declares your chosen identification method and the relevant node set.
     method: "backdoor", "frontdoor", or "iv"
     nodes:  adjustment set (backdoor), mediator set (frontdoor),
-            or single-element list [instrument_node] (iv). Pass node IDs as strings.
+            or instrumental variable set (iv). Pass node IDs as strings.
     REQUIRED: Call this in every Turn 1 response.
 
   marginal(variables)
