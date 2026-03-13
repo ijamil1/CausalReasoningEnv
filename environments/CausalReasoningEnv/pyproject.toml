@@ -20,6 +20,8 @@ include = [
     "env.py",
     "prompts.py",
     "pyproject.toml",
+    "data_generation/__init__.py",
+    "data_generation/gen.py"
 ]
 
 [tool.verifiers.eval]
