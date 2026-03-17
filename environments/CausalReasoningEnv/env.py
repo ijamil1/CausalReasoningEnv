@@ -405,7 +405,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
                 ate_accuracy_binary,
                 process_correctness,
             ],
-            weights=[0.01, 0.145, 0.145, 0.10, 0.50, 0.10],
+            weights=[0.01, 0.145, 0.145, 0.05, 0.50, 0.15],
         )
         super().__init__(
             dataset=dataset,
