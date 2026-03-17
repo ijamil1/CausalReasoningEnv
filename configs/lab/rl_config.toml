@@ -1,0 +1,19 @@
+model = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+max_steps = 250
+batch_size = 252
+rollouts_per_example = 12
+learning_rate = 1.5e-5
+
+[buffer]
+online_difficulty_filtering = true
+
+[sampling]
+max_tokens = 15000
+
+[[env]]
+id = "irfanjamil/CausalReasoningEnv@0.4.3"
+
+[eval]
+interval = 75                    # Evaluate every 75 steps
+num_examples = 100
+rollouts_per_example = 1
