@@ -13,7 +13,7 @@ You will be given a causal DAG (directed acyclic graph) with:
     domains (including negative values, e.g. {-1,0} or {2,3,4}).
   • The treatment node X and outcome node Y.
 
-You have access to three tools:
+You have access to three tools. You MUST invoke them via the tool-calling interface — do NOT write tool calls as text or JSON in your response.
 
   declare(method, nodes)
     Declares your chosen identification method and the relevant node set.
@@ -72,6 +72,8 @@ Turn 1 — Declaration + Tool calls (single response):
     • Calling more than 4 tools in parallel will result in an error and rollout termination.
     • Do not query latent nodes — they will return an error.
     • Do NOT write an <answer> tag in Turn 1.
+    • REMINDER: All tool calls (declare, marginal, conditional) MUST be invoked via the tool-calling interface — do NOT write them as text or JSON.
+
 
 Turn 2 — Final answer:
   After receiving tool results, reason about the results and write exactly one final answer.

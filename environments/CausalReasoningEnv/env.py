@@ -287,7 +287,7 @@ def _prob_calls_from_turn1(completion: list) -> list[tuple[str, dict]]:
     for msg in completion:
         if msg.get("role") == "assistant":
             result = []
-            for tc in msg.get("tool_calls", []):
+            for tc in (msg.get("tool_calls") or []):
                 name = tc.get("function", {}).get("name", "")
                 if name in ("marginal", "conditional"):
                     try:
@@ -405,7 +405,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
                 ate_accuracy_binary,
                 process_correctness,
             ],
-            weights=[0.01, 0.145, 0.145, 0.05, 0.50, 0.15],
+            weights=[0.07, 0.145, 0.145, 0.0, 0.50, 0.14],
         )
         super().__init__(
             dataset=dataset,
@@ -547,7 +547,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
-        tool_calls = last_assistant.get("tool_calls", []) if last_assistant else []
+        tool_calls = (last_assistant.get("tool_calls") or []) if last_assistant else []
 
         # Step 2: Find declare call
         declare_call = next(
