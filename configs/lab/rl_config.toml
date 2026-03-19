@@ -11,7 +11,8 @@ online_difficulty_filtering = true
 max_tokens = 15000
 
 [[env]]
-id = "irfanjamil/CausalReasoningEnv@0.4.3"
+id = "irfanjamil/CausalReasoningEnv@0.4.5"
+args = { max_turns = 2 }
 
 [eval]
 interval = 75                    # Evaluate every 75 steps

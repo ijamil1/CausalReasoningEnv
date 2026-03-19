@@ -24,7 +24,7 @@ from data_generation.gen import is_valid_backdoor_set, is_valid_frontdoor_set, i
 from prompts import SYSTEM_PROMPT
 
 MAX_PARALLEL_TOOL_CALLS = 4  # declare + up to 3 probability tools (frontdoor worst case)
-MAX_TURNS = 2  # declaration + tools / answer
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -407,13 +407,14 @@ class CausalATEEnv(vf.StatefulToolEnv):
             ],
             weights=[0.07, 0.145, 0.145, 0.0, 0.50, 0.14],
         )
+        max_num_turns = 2
         super().__init__(
             dataset=dataset,
             eval_dataset=eval_dataset,
             system_prompt=SYSTEM_PROMPT,
             tools=[],
             rubric=rubric,
-            max_turns=MAX_TURNS,
+            max_turns=max_num_turns,
             **kwargs,
         )
         self.add_tool(self.declare)
