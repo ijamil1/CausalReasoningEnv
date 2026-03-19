@@ -17,14 +17,15 @@ You have access to three tools. You MUST invoke them via the tool-calling interf
 
   declare(method, nodes)
     Declares your chosen identification method and the relevant node set.
-    method: "backdoor", "frontdoor", or "iv"
+    method: "backdoor", "frontdoor", or "iv". Example: "backdoor"
     nodes:  adjustment set (backdoor), mediator set (frontdoor),
-            or instrumental variable set (iv). Pass node IDs as strings.
+            or instrumental variable set (iv). Pass node IDs as integers.
+            Example: [1, 3]
     REQUIRED: Call this in every Turn 1 response.
 
   marginal(variables)
     Returns the full joint PMF P(V1, V2, ...) for all value combinations of the given variables.
-    Input:  variables — list of node IDs as strings. Example: ["2", "3"]
+    Input:  variables — list of node IDs as integers. Example: [2, 3]
     Output: one line per value combination:
             P(node2=0, node3=-1) = 0.1234
             P(node2=1, node3=-1) = 0.3456  ...
@@ -32,8 +33,10 @@ You have access to three tools. You MUST invoke them via the tool-calling interf
 
   conditional(query, given)
     Returns P(query | given) for ALL strata of the conditioning variables.
-    Input:  query — list of node IDs for the query variables.
-            given — list of node IDs for the conditioning variables.
+    Input:  query — list of node IDs as integers for the query variables.
+                    Example: [4] — returns P(node4=v | given) for all values v of node4 and all strata of given.
+            given — list of node IDs as integers for the conditioning variables.
+                    Example: [0, 2] — conditions on all value combinations of node0 and node2.
     Output: one line per (query-value, given-stratum) combination:
             P(node4=0 | node0=0, node2=-1) = 0.7234
             P(node4=1 | node0=0, node2=-1) = 0.2766  ...

@@ -81,8 +81,8 @@ async def marginal(
     """Return the full joint PMF P(V1, V2, ...) for the given observed variables.
 
     Args:
-        variables: List of node IDs (as strings) to compute the joint marginal for.
-                   Example: ["2", "3"] returns P(node2, node3) for all value combos.
+        variables: List of node IDs (as integers) to compute the joint marginal for.
+                   Example: [2, 3] returns P(node2, node3) for all value combos.
     """
     int_vars = [int(v) for v in variables]
     for v in int_vars:
@@ -109,9 +109,10 @@ async def conditional(
     """Return the full conditional PMF P(query | given) for all strata of given variables.
 
     Args:
-        query: List of node IDs (strings) for the query variables.
-        given: List of node IDs (strings) for the conditioning variables.
-               Returns P(query=q | given=g) for every combination of q and g values.
+        query: List of node IDs (as integers) for the query variables.
+               Example: [4] — computes P(node4=v | given) for all values v of node4 and all strata of given.
+        given: List of node IDs (as integers) for the conditioning variables.
+               Example: [0, 2] — conditions on all value combinations of node0 and node2.
     """
     int_query = [int(v) for v in query]
     int_given = [int(v) for v in given]
@@ -464,9 +465,10 @@ class CausalATEEnv(vf.StatefulToolEnv):
         """Declare your identification method and the relevant node set.
 
         Args:
-            method: "backdoor", "frontdoor", or "iv"
+            method: "backdoor", "frontdoor", or "iv". Example: "backdoor"
             nodes: adjustment set (backdoor), mediator set (frontdoor),
-                   or instrumental variable set (iv). Pass node IDs as strings.
+                   or instrumental variable set (iv). Pass node IDs as integers.
+                   Example: [1, 3]
         """
         return f"Declaration received: method={method}, nodes={nodes}"
 
