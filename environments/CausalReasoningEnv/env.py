@@ -396,7 +396,7 @@ async def process_correctness(completion, info, state) -> float:
 class CausalATEEnv(vf.StatefulToolEnv):
     """Two-phase environment for ATE/LATE estimation via probability query tools."""
 
-    def __init__(self, dataset: Dataset, eval_dataset: Dataset | None = None, **kwargs):
+    def __init__(self, dataset: Dataset, eval_dataset: Dataset | None = None, max_turns: int = 2, **kwargs):
         rubric = vf.Rubric(
             funcs=[
                 format_compliance,
@@ -408,14 +408,13 @@ class CausalATEEnv(vf.StatefulToolEnv):
             ],
             weights=[0.07, 0.145, 0.145, 0.0, 0.50, 0.14],
         )
-        max_num_turns = 2
         super().__init__(
             dataset=dataset,
             eval_dataset=eval_dataset,
             system_prompt=SYSTEM_PROMPT,
             tools=[],
             rubric=rubric,
-            max_turns=max_num_turns,
+            max_turns=max_turns,
             **kwargs,
         )
         self.add_tool(self.declare)
@@ -669,11 +668,13 @@ class CausalATEEnv(vf.StatefulToolEnv):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def load_environment(**kwargs) -> CausalATEEnv:
+def load_environment(max_turns: int = 2, **kwargs) -> CausalATEEnv | None:
     """Instantiate CausalATEEnv from a pre-built HuggingFace Dataset.
 
     Load from HuggingFace Hub (irfanjamil/causal-reasoning-ate).
     """
+    if max_turns != 2:
+        return None
     train_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="train")
     eval_ds = load_dataset("irfanjamil/causal-reasoning-ate", split="eval")
-    return CausalATEEnv(dataset=train_ds, eval_dataset=eval_ds, **kwargs)
+    return CausalATEEnv(dataset=train_ds, eval_dataset=eval_ds, max_turns=max_turns, **kwargs)

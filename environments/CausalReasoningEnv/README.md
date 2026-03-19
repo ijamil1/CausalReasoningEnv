@@ -31,29 +31,31 @@ The stored `minimal_set` holds the minimal adjustment set (backdoor), minimal me
 
 | Component | Weight | Description |
 |-----------|--------|-------------|
-| `format_compliance` | 0.05 | 0.0 on Turn-1 format violations, answer in Turn 1, or missing answer after valid declaration |
-| `method_validity` | 0.125 | 1.0 if declared method matches the problem's identification method |
-| `set_validity` | 0.125 | 1.0 if declared node set correctly identifies the effect; gated on `method_validity` |
-| `minimality` | 0.10 | 1.0 if set equals `minimal_set`; k/\|declared\| if valid superset; gated on both validity scores |
-| `ate_accuracy_binary` | 0.50 | 1.0 if \|answer − true target\| < 0.1; works for ATE and LATE |
-| `ate_accuracy_l2` | 0.10 | exp(−10 × error²); continuous accuracy score |
+| `format_compliance` | 0.07 | 0.0 on Turn-1 format violations, answer in Turn 1, or missing answer after valid declaration |
+| `method_validity` | 0.145 | 1.0 if declared method matches the problem's identification method |
+| `set_validity` | 0.145 | 1.0 if declared node set correctly identifies the effect; gated on `method_validity` |
+| `minimality` | 0.0 | 1.0 if set equals `minimal_set`; k/\|declared\| if valid superset; gated on both validity scores (metrics only, no reward weight) |
+| `ate_accuracy_binary` | 0.50 | 1.0 if \|answer − true target\| < 0.001; works for ATE and LATE |
+| `process_correctness` | 0.14 | Graded score for correct intermediate computation steps |
 
 ### Tools
 
 ```
 declare(method, nodes)
   Declare identification method and the relevant node set. REQUIRED in Turn 1.
-  method: "backdoor", "frontdoor", or "iv"
-  nodes:  adjustment set (backdoor), mediator set (frontdoor), or [instrument] (iv)
+  method: "backdoor", "frontdoor", or "iv". Example: "backdoor"
+  nodes:  adjustment set (backdoor), mediator set (frontdoor), or [instrument] (iv).
+          Pass node IDs as integers. Example: [1, 3]
 
 marginal(variables)
   Returns the full joint PMF P(V1, V2, ...) for all value combinations.
-  Input:  variables — list of node IDs as strings, e.g. ["2", "3"]
+  Input:  variables — list of node IDs as integers, e.g. [2, 3]
   Output: P(node2=0, node3=-1) = 0.1234 ...
 
 conditional(query, given)
   Returns P(query | given) for all strata of the conditioning variables.
-  Input:  query, given — lists of node IDs as strings
+  Input:  query — list of node IDs as integers, e.g. [4]
+          given — list of node IDs as integers, e.g. [0, 2]
   Output: P(node4=0 | node0=0, node2=-1) = 0.7234 ...
 ```
 
