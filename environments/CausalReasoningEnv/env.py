@@ -265,7 +265,7 @@ async def ate_accuracy_binary(completion, info) -> float:
     if isinstance(info, str):
         info = json.loads(info)
     answer = _parse_answer(completion)
-    if not answer:
+    if not answer or answer is None:
         return 0.0
     ptype = info.get("problem_type", "")
     prefix = "LATE=" if ptype == "iv" else "ATE="
