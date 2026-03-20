@@ -549,7 +549,10 @@ class CausalATEEnv(vf.StatefulToolEnv):
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
-        tool_calls = (last_assistant.get("tool_calls") or []) if last_assistant else []
+        raw_tool_calls = (last_assistant.get("tool_calls") or []) if last_assistant else []
+        tool_calls = [
+            json.loads(tc) if isinstance(tc, str) else tc for tc in raw_tool_calls
+        ]
 
         # Step 2: Find declare call
         declare_call = next(
