@@ -148,7 +148,7 @@ def _parse_answer(messages: list) -> str | None:
     """Extract the content of the last <answer> block from the last assistant message."""
     for msg in reversed(messages):
         if msg.get("role") == "assistant":
-            content = msg.get("content", "")
+            content = msg.get("content") or ""
             matches = re.findall(
                 r"<answer>\s*((?:ATE|LATE)=[-+]?\d+(?:\.\d+)?)\s*</answer>",
                 content,
