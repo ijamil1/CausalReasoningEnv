@@ -288,11 +288,13 @@ def _prob_calls_from_turn1(completion: list) -> list[tuple[str, dict]]:
     for msg in completion:
         if msg.get("role") == "assistant":
             result = []
-            for tc in (msg.get("tool_calls") or []):
-                name = tc.get("function", {}).get("name", "")
+            for tc_raw in (msg.get("tool_calls") or []):
+                tc = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
+                name = tc.get("function", {}).get("name", "") or tc.get("name", "")
                 if name in ("marginal", "conditional"):
                     try:
-                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        raw_args = (tc.get("function") or tc).get("arguments", "{}")
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     except Exception:
                         args = {}
                     result.append((name, args))
@@ -592,7 +594,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         # Step 4: Check probability calls
         probability_calls = [
             tc for tc in tool_calls
-            if tc.get("function", {}).get("name") in ("marginal", "conditional")
+            if _tc_name(tc) in ("marginal", "conditional")
         ]
         if not probability_calls:
             termination = [
@@ -658,8 +660,35 @@ class CausalATEEnv(vf.StatefulToolEnv):
             state["final_env_response"] = termination
             return termination
 
-        # Step 7: Execute all tools via parent
-        tool_messages = await super().env_response(messages, state, **kwargs)
+        # Step 7: Execute all tools via parent.
+        # Normalize the last assistant message's tool_calls to the nested OpenAI schema
+        # expected by ToolEnv.env_response, since the training pipeline (prime-rl/vLLM)
+        # serializes tool calls as JSON strings in a flat schema.
+        normalized_messages = list(messages)
+        last_idx = next(
+            (i for i, m in enumerate(reversed(normalized_messages)) if m.get("role") == "assistant"),
+            None,
+        )
+        if last_idx is not None:
+            idx = len(normalized_messages) - 1 - last_idx
+            msg = dict(normalized_messages[idx])
+            normalized_tcs = []
+            for tc_raw in (msg.get("tool_calls") or []):
+                tc = json.loads(tc_raw) if isinstance(tc_raw, str) else dict(tc_raw)
+                # Convert flat schema to nested if needed
+                if "function" not in tc:
+                    tc = {
+                        "id": tc.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": tc.get("arguments", "{}"),
+                        },
+                    }
+                normalized_tcs.append(tc)
+            msg["tool_calls"] = normalized_tcs
+            normalized_messages[idx] = msg
+        tool_messages = await super().env_response(normalized_messages, state, **kwargs)
 
         # Step 8: Append Turn 2 prompt
         turn2_content = (
