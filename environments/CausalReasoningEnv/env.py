@@ -554,9 +554,14 @@ class CausalATEEnv(vf.StatefulToolEnv):
             json.loads(tc) if isinstance(tc, str) else tc for tc in raw_tool_calls
         ]
 
+        def _tc_name(tc: dict) -> str | None:
+            # Nested schema: {"function": {"name": ..., "arguments": ...}}
+            # Flat schema:   {"name": ..., "arguments": ...}
+            return tc.get("function", {}).get("name") or tc.get("name")
+
         # Step 2: Find declare call
         declare_call = next(
-            (tc for tc in tool_calls if tc.get("function", {}).get("name") == "declare"),
+            (tc for tc in tool_calls if _tc_name(tc) == "declare"),
             None,
         )
         if declare_call is None:
@@ -566,7 +571,8 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
         # Step 3: Parse and validate declare args
         try:
-            declare_args = json.loads(declare_call["function"]["arguments"])
+            raw_args = (declare_call.get("function") or declare_call).get("arguments", "{}")
+            declare_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
             method = declare_args["method"]
             nodes_arg = declare_args["nodes"]
             declared_nodes = [int(n) for n in nodes_arg]
