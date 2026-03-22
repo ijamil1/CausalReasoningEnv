@@ -477,9 +477,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         self,
         tool_name: str,
         tool_args: dict,
-        messages: vf.Messages,
         state: vf.State,
-        **kwargs,
     ) -> dict:
         """Inject per-rollout CPT state into marginal/conditional tool calls."""
         if tool_name not in ("marginal", "conditional"):
@@ -662,7 +660,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
             tool_call_id = tool_call.get("id")
             
             tool_message: vf.Message = await self.call_tool(
-                            tool_name, tool_args, tool_call_id
+                            tool_name, self.update_tool_args(tool_name, tool_args, state), tool_call_id
                         )
             
             tool_messages.append(tool_message)
