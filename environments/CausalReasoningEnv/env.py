@@ -492,9 +492,6 @@ class CausalATEEnv(vf.StatefulToolEnv):
         args["_latent_nodes"] = state["_latent_nodes"]
         return args
 
-    @vf.stop
-    async def no_tools_called(self, state: vf.State) -> bool:
-        return False
 
     @vf.stop
     async def end_of_phase(self, state: vf.State) -> bool:
@@ -551,21 +548,15 @@ class CausalATEEnv(vf.StatefulToolEnv):
         last_assistant = next(
             (m for m in reversed(messages) if m.get("role") == "assistant"), None
         )
-        raw_tool_calls = (last_assistant.get("tool_calls") or []) if last_assistant else []
-        tool_calls = [
-            json.loads(tc) if isinstance(tc, str) else tc for tc in raw_tool_calls
-        ]
-
-        def _tc_name(tc: dict) -> str | None:
-            # Nested schema: {"function": {"name": ..., "arguments": ...}}
-            # Flat schema:   {"name": ..., "arguments": ...}
-            return tc.get("function", {}).get("name") or tc.get("name")
-
+        
+        tool_calls = (last_assistant.get("tool_calls") or []) if last_assistant else []
+        
         # Step 2: Find declare call
         declare_call = next(
-            (tc for tc in tool_calls if _tc_name(tc) == "declare"),
+            (tc for tc in tool_calls if tc.get("function", {}).get("name", "") == "declare"),
             None,
         )
+
         if declare_call is None:
             termination = [{"role": "user", "content": "Error: declare() was not called. Rollout terminated."}]
             state["final_env_response"] = termination
@@ -573,8 +564,9 @@ class CausalATEEnv(vf.StatefulToolEnv):
 
         # Step 3: Parse and validate declare args
         try:
-            raw_args = (declare_call.get("function") or declare_call).get("arguments", "{}")
-            declare_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            declare_args = json.loads(
+                    declare_call.get("function", {}).get("arguments", "")
+                )
             method = declare_args["method"]
             nodes_arg = declare_args["nodes"]
             declared_nodes = [int(n) for n in nodes_arg]
@@ -594,7 +586,7 @@ class CausalATEEnv(vf.StatefulToolEnv):
         # Step 4: Check probability calls
         probability_calls = [
             tc for tc in tool_calls
-            if _tc_name(tc) in ("marginal", "conditional")
+            if tc.get("function", {}).get("name", "") in ("marginal", "conditional")
         ]
         if not probability_calls:
             termination = [
@@ -660,35 +652,21 @@ class CausalATEEnv(vf.StatefulToolEnv):
             state["final_env_response"] = termination
             return termination
 
-        # Step 7: Execute all tools via parent.
-        # Normalize the last assistant message's tool_calls to the nested OpenAI schema
-        # expected by ToolEnv.env_response, since the training pipeline (prime-rl/vLLM)
-        # serializes tool calls as JSON strings in a flat schema.
-        normalized_messages = list(messages)
-        last_idx = next(
-            (i for i, m in enumerate(reversed(normalized_messages)) if m.get("role") == "assistant"),
-            None,
-        )
-        if last_idx is not None:
-            idx = len(normalized_messages) - 1 - last_idx
-            msg = dict(normalized_messages[idx])
-            normalized_tcs = []
-            for tc_raw in (msg.get("tool_calls") or []):
-                tc = json.loads(tc_raw) if isinstance(tc_raw, str) else dict(tc_raw)
-                # Convert flat schema to nested if needed
-                if "function" not in tc:
-                    tc = {
-                        "id": tc.get("id", ""),
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name", ""),
-                            "arguments": tc.get("arguments", "{}"),
-                        },
-                    }
-                normalized_tcs.append(tc)
-            msg["tool_calls"] = normalized_tcs
-            normalized_messages[idx] = msg
-        tool_messages = await super().env_response(normalized_messages, state, **kwargs)
+        # Step 7: Execute probability tools
+        tool_messages = []
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("function", {}).get("name", "")
+            tool_args = json.loads(
+                        tool_call.get("function", {}).get("arguments", "")
+                    )
+            tool_call_id = tool_call.get("id")
+            
+            tool_message: vf.Message = await self.call_tool(
+                            tool_name, tool_args, tool_call_id
+                        )
+            
+            tool_messages.append(tool_message)
+        
 
         # Step 8: Append Turn 2 prompt
         turn2_content = (
