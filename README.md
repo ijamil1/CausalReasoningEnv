@@ -2,21 +2,23 @@
 
 A workspace for building causal reasoning RL training environments using Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
 
-The environment trains models to identify causal effects via backdoor adjustment, frontdoor criterion, or instrumental variables, and compute ATE/LATE via probability query tools over discrete CPT-based DAGs. See [`BENCHMARK_DESIGN.md`](BENCHMARK_DESIGN.md) for the full design rationale.
+The environment trains models to identify causal effects via backdoor adjustment, frontdoor criterion, or instrumental variables using CPT-based DAGs. The focus is on **causal identification** — selecting the correct method, node set, and probability queries — not on computing numerical ATE/LATE values.
 
 ## Environment
 
 → **[`environments/CausalReasoningEnv/`](environments/CausalReasoningEnv/)** — the main package. See its [README](environments/CausalReasoningEnv/README.md) for design details, install instructions, and eval commands.
 
-### Two-Phase Design
+### Single-Turn Design
 
-**Phase 1 (declaration + tools, Turn 1):** Model reasons about the DAG, calls `declare(method, nodes)` to commit to an identification approach, and makes all probability tool calls in the same response. Rollout terminates early on format violations or invalid declarations.
+The model receives a DAG description and produces a single structured response containing:
+- A `<declare method="..." nodes="..."/>` tag specifying the identification method and relevant node set
+- 1–3 probability query tags (`<marginal variables="..."/>` or `<conditional query="..." given="..."/>`) specifying the queries needed to compute the causal effect
 
-**Phase 2 (answer, Turn 2):** Model receives tool results and writes `<answer>ATE=X.XXXX</answer>` (backdoor/frontdoor) or `<answer>LATE=X.XXXX</answer>` (IV).
+No tool-calling API is used. All output is plain text with XML self-closing tags parsed by the environment.
 
-### Reward (weights: 0.05 / 0.125 / 0.125 / 0.10 / 0.50 / 0.10)
+### Reward (weights: 0.10 / 0.30 / 0.30 / 0.00 / 0.30)
 
-`format_compliance` / `method_validity` / `set_validity` / `minimality` / `ate_accuracy_binary` / `ate_accuracy_l2`
+`format_compliance` / `method_validity` / `set_validity` / `minimality` / `process_correctness`
 
 ## Repository Structure
 
@@ -24,8 +26,8 @@ The environment trains models to identify causal effects via backdoor adjustment
 environments/
   CausalReasoningEnv/              # Main package — load_environment() → CausalATEEnv
     CausalReasoningEnv.py          #   Entry point
-    env.py                         #   CausalATEEnv — tools, rubric, two-phase stop logic
-    prompts.py                     #   SYSTEM_PROMPT — declaration format, tool docs
+    env.py                         #   CausalATEEnv — XML parser, rubric, reward functions
+    prompts.py                     #   SYSTEM_PROMPT — XML tag format, examples
     data_generation/
       gen.py                       #   DAG generation, problem sampling, dataset builder
       generate_datasets.py         #   CLI: regenerate and upload datasets
@@ -34,10 +36,7 @@ environments/
 
 configs/
   lab/
-    phase1.toml                    # Training config: CausalReasoningEnv
-
-BENCHMARK_DESIGN.md                # Full benchmark design doc
-IMPLEMENTATION_PLAN.md             # Detailed implementation spec (declaration + tool use design)
+    rl_config.toml                 # Training config: CausalReasoningEnv
 ```
 
 ## Setup

@@ -8,15 +8,16 @@ This repo builds a **causal reasoning benchmark** and paired RL training environ
 
 | Dir | Status | Description |
 |-----|--------|-------------|
-| `CausalReasoningEnv/` | ✅ Implemented | Single package: `load_environment()` returns a `CausalATEEnv`. Two-phase multi-turn design: declaration turn + tool use + answer. |
+| `CausalReasoningEnv/` | ✅ Implemented | Single package: `load_environment()` returns a `CausalATEEnv`. Single-turn design: model outputs XML-tagged identification method, node set, and probability queries in one response. |
 
 ### Benchmark Design
 
-The environment implements a two-phase rollout over CPT-based DAGs:
+The environment implements a **single-turn rollout** over CPT-based DAGs. The model receives a DAG description and produces one response containing:
 
-**Phase 1 (declaration + tools, Turn 1):** Model reasons about the DAG, calls `declare(method, nodes)` to commit to an identification approach and relevant node set, and makes all needed probability tool calls in the same response. Rollout terminates early if: no `declare` call, unparseable args, unknown method, no probability calls, or >4 total tool calls. Additionally terminates if the declared method or set is invalid.
+1. A `<declare method="..." nodes="..."/>` tag specifying the identification method and relevant node set.
+2. Between 1 and 3 probability query tags (`<marginal variables="..."/>` or `<conditional query="..." given="..."/>`) specifying the queries needed to compute the causal effect.
 
-**Phase 2 (answer, Turn 2):** Model receives tool results and writes `<answer>ATE=X.XXXX</answer>` (backdoor/frontdoor) or `<answer>LATE=X.XXXX</answer>` (IV). Capped at 4 tool calls total (declare + up to 3 probability tools, which covers the frontdoor worst case).
+No tool-calling API is used. All output is plain text with XML self-closing tags parsed directly from the assistant message. The environment does **not** evaluate numerical ATE/LATE computation — reward is entirely based on identification correctness and probability query correctness.
 
 ### Problem Types
 
@@ -35,24 +36,22 @@ Reuse from [env.py](CausalReasoningEnv/env.py) and [data_generation/gen.py](Caus
 - `_make_dag`, `_try_sample_backdoor`, `_try_sample_frontdoor`, `_try_sample_iv` — DAG generation (in `gen.py`)
 - `is_valid_backdoor_set`, `is_valid_frontdoor_set`, `is_valid_iv` — verifier functions exported from `gen.py`, imported by `env.py`
 - `format_problem` — DAG text rendering (in `gen.py`)
-- `_joint_marginal`, `_reconstruct_graph`, `_parse_answer` — inference and parsing helpers (in `env.py`)
+- `_reconstruct_graph` — rebuilds NetworkX DiGraph from stored edges (in `env.py`)
+- `_parse_xml_tool_calls`, `_parse_declaration` — XML tag parsers for model output (in `env.py`)
+- `_has_marginal_of`, `_has_conditional_of` — probability query target checkers (in `env.py`)
 
 ### Reward Rubric
 
-6-component rubric (weights: 0.05 / 0.125 / 0.125 / 0.10 / 0.50 / 0.10):
-- **`format_compliance`** — 0.0 if any Turn-1 format violation, answer tag in Turn 1, or missing answer after valid declaration
+5-component rubric (weights: 0.10 / 0.30 / 0.30 / 0.00 / 0.30):
+- **`format_compliance`** — 1.0 if response has exactly 1 valid `<declare/>`, 1–3 probability query tags, and all node IDs are integers; 0.0 otherwise
 - **`method_validity`** — 1.0 if declared method matches the problem's identification method
-- **`set_validity`** — 1.0 if declared node set correctly identifies the causal effect for the declared method; gated on `method_validity=1.0`
-- **`minimality`** — graded: 1.0 if declared set equals `minimal_set`; k/|declared| if valid superset; gated on both validity scores
-- **`ate_accuracy_binary`** — 1.0 if |answer − true target| < 0.1; works for both ATE and LATE
-- **`ate_accuracy_l2`** — exp(−10 × error²); continuous accuracy score
+- **`set_validity`** — 1.0 if declared node set correctly identifies the causal effect for the declared method
+- **`minimality`** — graded: 1.0 if declared set equals `minimal_set`; k/|declared| if valid superset; gated on `set_validity=1.0` (metric only, zero weight)
+- **`process_correctness`** — graded score for specifying correct probability query distributions; gated on `set_validity=1.0` and `format_compliance=1.0`
 
-### Tools for CausalReasoningEnv
+### No Tools
 
-Three tools are exposed to the model via `StatefulToolEnv`. Per-rollout CPT state is injected via `update_tool_args` (hidden from the model schema) for probability tools only:
-- `declare(method, nodes)` — declares identification method ("backdoor"/"frontdoor"/"iv") and relevant node set; REQUIRED in every Turn 1 response
-- `marginal(variables)` — returns the full joint PMF P(V1, V2, ...) for given observed variables
-- `conditional(query, given)` — returns the full conditional PMF P(query | given) for all strata
+`CausalATEEnv` extends `vf.SingleTurnEnv` — there are no tool calls. The model outputs XML self-closing tags in plain text; the environment parses them with regex.
 
 ### Data Generation Notes
 

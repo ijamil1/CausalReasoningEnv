@@ -1,18 +1,45 @@
 # CausalReasoningEnv
 
-Multi-turn causal reasoning benchmark and RL training environment, built with Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
+Single-turn causal reasoning benchmark and RL training environment, built with Prime Intellect's [verifiers](https://github.com/PrimeIntellect-ai/verifiers) framework.
 
-The environment trains models to identify causal effects via backdoor adjustment, frontdoor criterion, or instrumental variables, and compute ATE/LATE via probability query tools over discrete CPT-based DAGs.
+The environment trains models to identify causal effects via backdoor adjustment, frontdoor criterion, or instrumental variables over CPT-based DAGs. The focus is on **causal identification** — selecting the correct method, the correct node set, and the correct probability queries — not on computing numerical ATE/LATE values.
 
 ---
 
 ## Design
 
-### Two-Phase Rollout
+### Single-Turn Rollout
 
-**Phase 1 — Declaration + Tools (Turn 1):** The model reasons about the DAG structure, calls `declare(method, nodes)` to commit to an identification method and relevant node set, and makes all needed probability tool calls in the same response. A global cap of 4 total tool calls is enforced (declare + up to 3 probability tools). The rollout terminates early if: `declare` is missing, arguments are unparseable, the method is unknown, no probability calls are made, the parallel limit is exceeded, or the declared method/set is invalid.
+The model receives a DAG description and produces **one response** containing:
 
-**Phase 2 — Answer (Turn 2):** The model receives tool results and writes a final answer. For backdoor/frontdoor: `<answer>ATE=X.XXXX</answer>`. For IV: `<answer>LATE=X.XXXX</answer>`.
+1. A `<declare method="..." nodes="..."/>` tag committing to an identification method and relevant node set.
+2. Between 1 and 3 probability query tags (`<marginal/>` or `<conditional/>`) specifying the queries needed to compute the causal effect under that method.
+
+No tool-calling API is used. All output is plain text with XML self-closing tags parsed directly from the assistant message.
+
+### Output Format
+
+```xml
+<reasoning>
+...your reasoning here...
+</reasoning>
+<declare method="backdoor" nodes="1,3"/>
+<marginal variables="1,3"/>
+<conditional query="6" given="4,1,3"/>
+```
+
+```xml
+<declare method="frontdoor" nodes="5"/>
+<conditional query="5" given="3"/>
+<marginal variables="3"/>
+<conditional query="7" given="3,5"/>
+```
+
+```xml
+<declare method="iv" nodes="0"/>
+<conditional query="3" given="0"/>
+<conditional query="7" given="0"/>
+```
 
 ### Problem Types
 
@@ -25,39 +52,24 @@ The environment trains models to identify causal effects via backdoor adjustment
 
 Each problem has **exactly one valid identification method** by construction (mutual exclusivity enforced at generation time).
 
-The stored `minimal_set` holds the minimal adjustment set (backdoor), minimal mediator set (frontdoor), or single-element instrument list (IV).
-
 ### Reward Rubric
 
 | Component | Weight | Description |
 |-----------|--------|-------------|
-| `format_compliance` | 0.07 | 0.0 on Turn-1 format violations, answer in Turn 1, or missing answer after valid declaration |
-| `method_validity` | 0.145 | 1.0 if declared method matches the problem's identification method |
-| `set_validity` | 0.145 | 1.0 if declared node set correctly identifies the effect; gated on `method_validity` |
-| `minimality` | 0.0 | 1.0 if set equals `minimal_set`; k/\|declared\| if valid superset; gated on both validity scores (metrics only, no reward weight) |
-| `ate_accuracy_binary` | 0.50 | 1.0 if \|answer − true target\| < 0.001; works for ATE and LATE |
-| `process_correctness` | 0.14 | Graded score for correct intermediate computation steps |
+| `format_compliance` | 0.10 | 1.0 if response has exactly 1 valid `<declare/>`, 1–3 probability query tags, and all node IDs are integers |
+| `method_validity` | 0.30 | 1.0 if declared method matches the problem's identification method |
+| `set_validity` | 0.30 | 1.0 if declared node set correctly identifies the effect for the declared method |
+| `minimality` | 0.00 | 1.0 if set equals `minimal_set`; k/\|declared\| if valid superset (metric only, zero weight) |
+| `process_correctness` | 0.30 | Graded score for specifying probability queries that target the right distributions; gated on `set_validity` and `format_compliance` |
 
-### Tools
+`process_correctness` targets per method:
 
-```
-declare(method, nodes)
-  Declare identification method and the relevant node set. REQUIRED in Turn 1.
-  method: "backdoor", "frontdoor", or "iv". Example: "backdoor"
-  nodes:  adjustment set (backdoor), mediator set (frontdoor), or [instrument] (iv).
-          Pass node IDs as integers. Example: [1, 3]
-
-marginal(variables)
-  Returns the full joint PMF P(V1, V2, ...) for all value combinations.
-  Input:  variables — list of node IDs as integers, e.g. [2, 3]
-  Output: P(node2=0, node3=-1) = 0.1234 ...
-
-conditional(query, given)
-  Returns P(query | given) for all strata of the conditioning variables.
-  Input:  query — list of node IDs as integers, e.g. [4]
-          given — list of node IDs as integers, e.g. [0, 2]
-  Output: P(node4=0 | node0=0, node2=-1) = 0.7234 ...
-```
+| Method | Targets |
+|--------|---------|
+| `backdoor_empty` | `conditional(Y \| X)` |
+| `backdoor_standard` | `marginal(Z)` + `conditional(Y \| X,Z)` |
+| `frontdoor` | `conditional(M \| X)` + `marginal(X)` + `conditional(Y \| X,M)` |
+| `iv` | `[marginal(Z,Y) or conditional(Y\|Z)]` + `[marginal(Z,X) or conditional(X\|Z)]` |
 
 ---
 
@@ -95,7 +107,7 @@ python data_generation/generate_datasets.py --n 1000 --push-hub
 ### Train
 
 ```bash
-prime train --config configs/lab/phase1.toml
+prime train --config configs/lab/rl_config.toml
 ```
 
 ---
@@ -105,8 +117,8 @@ prime train --config configs/lab/phase1.toml
 ```
 CausalReasoningEnv/
   CausalReasoningEnv.py           # load_environment() entry point
-  env.py                          # CausalATEEnv — tools, rubric, stop logic
-  prompts.py                      # SYSTEM_PROMPT — declaration format, tool docs
+  env.py                          # CausalATEEnv — XML parser, rubric, reward functions
+  prompts.py                      # SYSTEM_PROMPT — XML tag format and examples
   data_generation/
     gen.py                        # DAG generation, problem sampling, dataset builder
     generate_datasets.py          # CLI: regenerate and upload datasets
