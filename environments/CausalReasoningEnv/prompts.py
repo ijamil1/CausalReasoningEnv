@@ -35,29 +35,24 @@ Each DAG admits one of the following identification methods:
 
   PRIORITY: Always prefer backdoor or frontdoor over IV when either is applicable.
 
-PROBABILITY QUERIES
-───────────────────
-Specify the probability queries as self-closing XML tags in your response:
-
-  <marginal variables="n1,n2,..."/>
-    Returns P(node_n1, node_n2, ...) — the full joint marginal over the listed nodes.
-    Example: <marginal variables="1,3"/> returns P(node1, node3) for all value combinations.
-
-  <conditional query="n1,..." given="n2,..."/>
-    Returns P(node_n1,... | node_n2,...) for ALL strata of the conditioning variables.
-    Example: <conditional query="4" given="0,2"/> returns P(node4 | node0=v0, node2=v2)
-             for all values v0, v2.
-
-
 RESPONSE FORMAT
 ───────────────
-Write your reasoning, then output a <declare/> tag followed by one or more probability query tags.
+Write your reasoning, then output exactly one <declare/> tag followed by 1–3 probability query tags.
 
   <declare method="METHOD" nodes="n1,n2,..."/>
     METHOD: "backdoor", "frontdoor", or "iv"
     nodes:  adjustment set (backdoor), mediator set (frontdoor),
-            or instrumental variable (iv) — comma-separated integer node IDs.
+            or instrumental variable (iv).
+            Value: comma-separated integer node IDs, e.g. nodes="1,3".
             For backdoor with an empty adjustment set, use nodes="".
+
+  <marginal variables="n1,n2,..."/>
+    variables: comma-separated integer node IDs of the nodes to compute the joint marginal over.
+               e.g. variables="1,3"
+
+  <conditional query="n1,..." given="n2,..."/>
+    query: comma-separated integer node IDs of the query variables, e.g. query="6"
+    given: comma-separated integer node IDs of the conditioning variables, e.g. given="4,1,3"
 
   Example — backdoor:
     <reasoning>
@@ -86,7 +81,9 @@ Write your reasoning, then output a <declare/> tag followed by one or more proba
 
 RULES
 ─────
-  • <declare/> is REQUIRED in every response.
-  • At least 1 probability query (<marginal/> or <conditional/>) is REQUIRED.
+  • Exactly 1 <declare/> tag is REQUIRED.
+  • Between 1 and 3 probability query tags (<marginal/> or <conditional/>) are REQUIRED.
+  • All node IDs in tags must be integers.
+  • Do not include latent nodes in your probability queries.
   • Prefer backdoor or frontdoor over IV whenever applicable.
 """

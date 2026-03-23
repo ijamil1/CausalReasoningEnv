@@ -59,7 +59,10 @@ def _parse_declaration(completion: list) -> tuple[str | None, list[int] | None]:
         return None, None
     content = last.get("content", "") or ""
     calls = _parse_xml_tool_calls(content)
-    decl = next((c for c in calls if c["name"] == "declare"), None)
+    declare_calls = [c for c in calls if c["name"] == "declare"]
+    if len(declare_calls) != 1:
+        return None, None
+    decl = declare_calls[0]
     if not decl:
         return None, None
     method = decl.get("method", "").strip().lower()
@@ -77,17 +80,43 @@ def _parse_declaration(completion: list) -> tuple[str | None, list[int] | None]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _all_ints(*str_lists) -> bool:
+    """Return True if every element in every list is parseable as an integer."""
+    for lst in str_lists:
+        for v in lst:
+            try:
+                int(v)
+            except (ValueError, TypeError):
+                return False
+    return True
+
+
 async def format_compliance(completion) -> float:
-    """0.0 if the response is missing a valid <declare/> or has no probability queries; 1.0 otherwise."""
+    """0.0 if the response is missing a valid <declare/>, has no probability queries,
+    or any query/given/variables/nodes field contains non-integer values; 1.0 otherwise."""
     last = next((m for m in reversed(completion) if m.get("role") == "assistant"), None)
     if not last:
         return 0.0
     content = last.get("content", "") or ""
     calls = _parse_xml_tool_calls(content)
-    method, _ = _parse_declaration(completion)
+    method, nodes = _parse_declaration(completion)
     has_declare = method is not None
     has_prob = any(c["name"] in ("marginal", "conditional") for c in calls)
     if not has_declare or not has_prob:
+        return 0.0
+    
+    # all probability query fields must contain integers
+    prob_calls_ct = 0
+    for c in calls:
+        if c["name"] == "marginal":
+            if not _all_ints(c.get("variables", [])):
+                return 0.0
+            prob_calls_ct += 1
+        elif c["name"] == "conditional":
+            if not _all_ints(c.get("query", []), c.get("given", [])):
+                return 0.0
+            prob_calls_ct += 1
+    if prob_calls_ct > 3:
         return 0.0
     return 1.0
 
@@ -114,12 +143,15 @@ async def set_validity(completion, info) -> float:
     G = _reconstruct_graph(info)
     observed = set(info["observed_nodes"])
     X, Y = info["X"], info["Y"]
-    if method == "backdoor":
-        return 1.0 if is_valid_backdoor_set(G, X, Y, observed, nodes) else 0.0
-    elif method == "frontdoor":
-        return 1.0 if is_valid_frontdoor_set(G, X, Y, observed, nodes) else 0.0
-    elif method == "iv":
-        return 1.0 if (len(nodes) == 1 and is_valid_iv(G, X, Y, observed, nodes[0])) else 0.0
+    try:
+        if method == "backdoor":
+            return 1.0 if is_valid_backdoor_set(G, X, Y, observed, nodes) else 0.0
+        elif method == "frontdoor":
+            return 1.0 if is_valid_frontdoor_set(G, X, Y, observed, nodes) else 0.0
+        elif method == "iv":
+            return 1.0 if (len(nodes) == 1 and is_valid_iv(G, X, Y, observed, nodes[0])) else 0.0
+    except Exception:
+        return 0.0
     return 0.0
 
 
@@ -162,26 +194,36 @@ def _to_int_set(arg) -> set:
     return {int(v) for v in arg}
 
 
-def _has_marginal_of(calls: list[dict], required: set) -> bool:
-    """True if any marginal call's variables is a superset of required."""
-    return any(
-        c["name"] == "marginal" and required.issubset(_to_int_set(c.get("variables", [])))
-        for c in calls
-    )
+def _has_marginal_of(calls: list[dict], required: set, observed: set) -> bool:
+    """True if any marginal call's variables is a superset of required and all variables are observed."""
+    for c in calls:
+        if c["name"] != "marginal":
+            continue
+        vars_set = _to_int_set(c.get("variables", []))
+        if vars_set - observed:
+            continue  # references non-observed nodes
+        if required.issubset(vars_set):
+            return True
+    return False
 
 
-def _has_conditional_of(calls: list[dict], query: set, given: set) -> bool:
-    """True if any conditional call has query as a subset of its query vars and exactly the required given vars.
+def _has_conditional_of(calls: list[dict], query: set, given: set, observed: set) -> bool:
+    """True if any conditional call has query as a subset of its query vars, exactly the required given vars,
+    and all referenced nodes are observed.
 
     Superset is allowed for query (extra query vars can be marginalized out).
     Exact match is required for given (conditioning on a superset or subset changes the distribution).
     """
-    return any(
-        c["name"] == "conditional"
-        and query.issubset(_to_int_set(c.get("query", [])))
-        and _to_int_set(c.get("given", [])) == given
-        for c in calls
-    )
+    for c in calls:
+        if c["name"] != "conditional":
+            continue
+        query_set = _to_int_set(c.get("query", []))
+        given_set = _to_int_set(c.get("given", []))
+        if (query_set | given_set) - observed:
+            continue  # references non-observed nodes
+        if query.issubset(query_set) and given_set == given:
+            return True
+    return False
 
 
 async def process_correctness(completion, info) -> float:
@@ -202,7 +244,8 @@ async def process_correctness(completion, info) -> float:
     if isinstance(info, str):
         info = json.loads(info)
     sv = await set_validity(completion, info)
-    if sv < 1.0:
+    fc = await format_compliance(completion)
+    if sv < 1.0 or fc < 1.0:
         return 0.0
 
     method, nodes = _parse_declaration(completion)
@@ -210,33 +253,34 @@ async def process_correctness(completion, info) -> float:
     ptype = info.get("problem_type", "")
     X = info.get("X")
     Y = info.get("Y")
+    observed = set(info.get("observed_nodes", []))
 
     calls = _prob_calls_from_turn1(completion)
     if not calls:
         return 0.0
 
-    if ptype == "backdoor_empty":
-        return 1.0 if _has_conditional_of(calls, {Y}, {X}) else 0.0
+    if ptype == "backdoor_empty" and not len(declared_set):
+        return 1.0 if _has_conditional_of(calls, {Y}, {X}, observed) else 0.0
 
-    elif ptype == "backdoor_standard":
+    elif ptype == "backdoor_standard" or ptype == "backdoor_empty":
         hits = sum([
-            _has_marginal_of(calls, declared_set),
-            _has_conditional_of(calls, {Y}, {X} | declared_set),
+            _has_marginal_of(calls, declared_set, observed),
+            _has_conditional_of(calls, {Y}, {X} | declared_set, observed),
         ])
         return hits / 2
 
     elif ptype == "frontdoor":
         hits = sum([
-            _has_conditional_of(calls, declared_set, {X}),
-            _has_marginal_of(calls, {X}),
-            _has_conditional_of(calls, {Y}, {X} | declared_set),
+            _has_conditional_of(calls, declared_set, {X}, observed),
+            _has_marginal_of(calls, {X}, observed),
+            _has_conditional_of(calls, {Y}, {X} | declared_set, observed),
         ])
         return hits / 3
 
     elif ptype == "iv":
         Z = next(iter(declared_set))
-        hit_y = _has_marginal_of(calls, {Z, Y}) or _has_conditional_of(calls, {Y}, {Z})
-        hit_x = _has_marginal_of(calls, {Z, X}) or _has_conditional_of(calls, {X}, {Z})
+        hit_y = _has_marginal_of(calls, {Z, Y}, observed) or _has_conditional_of(calls, {Y}, {Z}, observed)
+        hit_x = _has_marginal_of(calls, {Z, X}, observed) or _has_conditional_of(calls, {X}, {Z}, observed)
         return (hit_y + hit_x) / 2
 
     return 0.0
