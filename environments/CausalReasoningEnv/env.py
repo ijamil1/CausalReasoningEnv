@@ -34,7 +34,13 @@ def _reconstruct_graph(info: dict) -> nx.DiGraph:
 
 
 def _parse_xml_tool_calls(content: str) -> list[dict]:
-    """Extract <declare/>, <marginal/>, <conditional/> self-closing tags from content."""
+    """Extract <declare/>, <marginal/>, <conditional/> self-closing tags from content.
+
+    Only searches after the closing </reasoning> tag if one is present.
+    """
+    close = content.find("</reasoning>")
+    if close != -1:
+        content = content[close + len("</reasoning>"):]
     calls = []
     for m in re.finditer(r'<declare\s+([^/>]*)/>', content):
         attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
@@ -60,9 +66,7 @@ def _parse_declaration(completion: list) -> tuple[str | None, list[int] | None]:
     content = last.get("content", "") or ""
     calls = _parse_xml_tool_calls(content)
     declare_calls = [c for c in calls if c["name"] == "declare"]
-    if len(declare_calls) != 1:
-        return None, None
-    decl = declare_calls[0]
+    decl = declare_calls[-1] if len(declare_calls) else False
     if not decl:
         return None, None
     method = decl.get("method", "").strip().lower()
@@ -107,6 +111,7 @@ async def format_compliance(completion) -> float:
     
     # all probability query fields must contain integers
     prob_calls_ct = 0
+    declare_call_ct = 0
     for c in calls:
         if c["name"] == "marginal":
             if not _all_ints(c.get("variables", [])):
@@ -116,7 +121,9 @@ async def format_compliance(completion) -> float:
             if not _all_ints(c.get("query", []), c.get("given", [])):
                 return 0.0
             prob_calls_ct += 1
-    if prob_calls_ct > 3:
+        else:
+            declare_call_ct+=1
+    if prob_calls_ct > 3 or declare_call_ct != 1:
         return 0.0
     return 1.0
 
@@ -244,8 +251,7 @@ async def process_correctness(completion, info) -> float:
     if isinstance(info, str):
         info = json.loads(info)
     sv = await set_validity(completion, info)
-    fc = await format_compliance(completion)
-    if sv < 1.0 or fc < 1.0:
+    if sv < 1.0:
         return 0.0
 
     method, nodes = _parse_declaration(completion)
