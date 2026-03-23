@@ -18,3 +18,4 @@ rollout_rewards.sh
 scripts/*
 IMPLEMENTATION_PLAN.md
 datasets/
+environments/CausalReasoningEnv/rescore.py
