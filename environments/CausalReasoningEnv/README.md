@@ -73,6 +73,32 @@ Each problem has **exactly one valid identification method** by construction (mu
 
 ---
 
+## Results
+
+### Example Problem — DAG Visualization
+
+A `backdoor_standard` problem from the eval set: 8 nodes (one latent, shown as a square), treatment X=3 (green), outcome Y=7 (red), minimal adjustment set {0, 4}.
+
+![Example eval DAG](plots/eval_example_DAG/first_eval_problem.png)
+
+### Evaluation — Baseline & RLFT'd Models
+
+Metric breakdown (method validity, set validity, process correctness, reward) across baseline and RLFT'd models, ordered weakest → strongest by reward. RLFT models are trained in our environment for 200 steps on our training dataset.
+
+![Eval metric breakdown](plots/eval_results/eval_summary_chart.png)
+
+![Reward by model](plots/eval_results/eval_reward_chart.png)
+
+![Process correctness by model](plots/eval_results/eval_process_correctness_chart.png)
+
+### RL Training — qwen/qwen3-30b-a3b-instruct
+
+Reward curve over 200 training steps, rising from ~0.4 to ~0.85.
+
+![Training reward](plots/RL_training/qwen3-30b-instruct-reward.png)
+
+---
+
 ## Install
 
 ```bash
@@ -107,7 +133,7 @@ python data_generation/generate_datasets.py --n 1000 --push-hub
 ### Train
 
 ```bash
-prime train --config configs/lab/rl_config.toml
+prime rl run configs/lab/rl_config.toml
 ```
 
 ---
@@ -125,31 +151,6 @@ CausalReasoningEnv/
   pyproject.toml
   README.md
 ```
-
----
-
-## Data Fields
-
-Each problem stored in the HuggingFace dataset has these fields in `info`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `problem_type` | str | `backdoor_empty` / `backdoor_standard` / `frontdoor` / `iv` |
-| `identification_methods` | list[str] | Single-element list: `["backdoor"]` / `["frontdoor"]` / `["iv"]` |
-| `edges` | list[list[int]] | DAG edges `[[u, v], ...]` for graph reconstruction |
-| `nodes` | list[int] | All node IDs |
-| `X`, `Y` | int | Treatment and outcome node IDs |
-| `observed_nodes` | list[int] | Observable nodes |
-| `latent_nodes` | list[int] | Latent (hidden) nodes |
-| `domains` | dict | Node ID → list of actual domain values (e.g. `[-1, 0]` or `[0,1,2,3,4]`) |
-| `cpts` | dict | Serialized CPTs; keys are pipe-delimited parent value strings |
-| `topo_order` | list[int] | Topological order |
-| `parents_map` | dict | Node ID → list of parent IDs |
-| `true_ATE` | float or None | Exact ATE via enumeration; non-None for backdoor/frontdoor |
-| `true_LATE` | float or None | Exact LATE via Wald estimator; non-None for IV |
-| `minimal_set` | list[int] | Minimal adjustment set (backdoor), mediator set (frontdoor), or `[iv_instrument]` |
-| `iv_instrument` | int or None | Node ID of the IV instrument; non-None for IV problems |
-
 ---
 
 ## Dependencies

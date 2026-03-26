@@ -20,6 +20,18 @@ No tool-calling API is used. All output is plain text with XML self-closing tags
 
 `format_compliance` / `method_validity` / `set_validity` / `minimality` / `process_correctness`
 
+## Results
+
+See [environments/CausalReasoningEnv/README.md](environments/CausalReasoningEnv/README.md#results) for evaluation plots and RL training curves. Summary below.
+
+**Eval — baseline vs RLFT'd models (ordered weakest → strongest by reward):**
+
+![Reward by model](environments/CausalReasoningEnv/plots/eval_results/eval_reward_chart.png)
+
+**RL training — qwen/qwen3-30b-a3b-instruct reward curve (200 steps):**
+
+![Training reward](environments/CausalReasoningEnv/plots/RL_training/qwen3-30b-instruct-reward.png)
+
 ## Repository Structure
 
 ```

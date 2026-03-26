@@ -1,6 +1,5 @@
 
 .env
-environments/CausalReasoningEnv/datasets/flavor1
 
 # outputs from `prime eval run`
 ./outputs
@@ -19,3 +18,5 @@ scripts/*
 IMPLEMENTATION_PLAN.md
 datasets/
 environments/CausalReasoningEnv/rescore.py
+visualize_problem.py
+*.DS_STORE

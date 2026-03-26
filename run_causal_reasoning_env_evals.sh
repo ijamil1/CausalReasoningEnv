@@ -2,9 +2,12 @@
 
 
 models=(
-  "qwen/qwen3-30b-a3b-instruct-2507"
   "openai/gpt-4.1-mini"
-  "openai/gpt-5.1-chat"
+  "openai/gpt-5.1-codex"
+  "qwen/qwen3-30b-a3b-thinking-2507"
+  "qwen/qwen3-30b-a3b-instruct-2507"
+  "Qwen/Qwen3-30B-A3B-Instruct-2507:o3iqo2s22s20ec9lezol5v6g"
+  "Qwen/Qwen3-30B-A3B-Thinking-2507:gko6mk1n7klelc2mipr7ve61"
   )
 
 EVALS_DIR="./environments/CausalReasoningEnv/outputs/evals/"
@@ -15,7 +18,7 @@ for model in "${models[@]}"; do
     echo "Skipping $model (already has eval results for $short_name)"
   else
     echo "Running eval with model: $model"
-    prime eval run irfanjamil/CausalReasoningEnv@0.1.3 -n 100 -r 3 -m "$model"
+    prime eval run irfanjamil/CausalReasoningEnv@0.5.7 -n 100 -r 3 -m "$model"
   fi
   echo ""
 done
